@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import MermaidChart from './MermaidChart';
 
 interface MarkdownViewerProps {
   content: string;
@@ -12,11 +13,8 @@ const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
       <ReactMarkdown 
         remarkPlugins={[remarkGfm]}
         components={{
-          // Customize links to look like blue text for GRI standards (which we set as empty links [GRI x]())
+          // Customize links to look like blue text for GRI standards
           a: ({node, href, children, ...props}) => {
-             // If it's an empty link (generated for styling), or just general links, make them blue.
-             // We disable pointer events if it's purely for styling (empty href or #), 
-             // but keeping it simple: just blue text.
              const isAnchor = !href || href === '' || href === '#';
              return (
                  <a 
@@ -27,6 +25,29 @@ const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
                     {children}
                  </a>
              );
+          },
+          // Custom Code Block Renderer for Mermaid
+          code: ({node, inline, className, children, ...props}: any) => {
+            const match = /language-(\w+)/.exec(className || '');
+            const isMermaid = match && match[1] === 'mermaid';
+
+            if (!inline && isMermaid) {
+              return <MermaidChart chart={String(children).replace(/\n$/, '')} />;
+            }
+
+            return !inline ? (
+                <div className="relative group">
+                    <pre className="bg-gray-800 text-gray-100 rounded-lg p-4 overflow-x-auto text-xs my-4">
+                        <code className={className} {...props}>
+                            {children}
+                        </code>
+                    </pre>
+                </div>
+            ) : (
+              <code className="bg-gray-100 text-red-500 px-1 py-0.5 rounded text-sm font-mono" {...props}>
+                {children}
+              </code>
+            );
           },
           table: ({node, ...props}) => (
             <div className="overflow-x-auto my-4 border border-gray-200 rounded-lg">
@@ -42,10 +63,7 @@ const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
           h1: ({node, ...props}) => <h1 className="text-2xl font-bold text-leaf-800 mt-6 mb-4 pb-2 border-b border-leaf-200" {...props} />,
           h2: ({node, ...props}) => <h2 className="text-xl font-semibold text-leaf-700 mt-5 mb-3" {...props} />,
           h3: ({node, ...props}) => <h3 className="text-lg font-medium text-leaf-600 mt-4 mb-2" {...props} />,
-          // Highlight warnings "敬請增補" in red/orange
           strong: ({node, children, ...props}) => {
-             // Check if children text contains the warning keyword
-             // This is a bit rough in React children inspection but visually 'strong' style is enough.
              return <strong className="font-bold text-orange-600" {...props}>{children}</strong>
           }, 
         }}
