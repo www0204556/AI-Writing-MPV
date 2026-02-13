@@ -1,0 +1,5 @@
+{
+  "name": "AI Writing MVP",
+  "description": "A RAG-powered tool assisting sustainability managers in generating GRI 305 compliant emission reports from raw data.",
+  "requestFramePermissions": []
+}
