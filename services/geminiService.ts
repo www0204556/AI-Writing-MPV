@@ -1,4 +1,4 @@
-import { GoogleGenAI, FunctionDeclaration, Type, Chat, Part } from "@google/genai";
+import { GoogleGenAI, FunctionDeclaration, Type, Chat, Part, Tool } from "@google/genai";
 import { StandardType } from "../types";
 import { GRI_KNOWLEDGE_BASE } from "../data/griStandards";
 import { processFile, ProcessedPart } from "./fileProcessing";
@@ -16,40 +16,51 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
  * Robust retry mechanism for API calls.
- * Handles transient network errors and rate limits (429).
+ * Handles transient network errors and rate limits (429/RESOURCE_EXHAUSTED).
  */
 const callWithRetry = async <T>(
   fn: () => Promise<T>, 
   retries: number = 3, 
-  initialDelay: number = 2000
+  initialDelay: number = 3000 // Increased initial delay
 ): Promise<T> => {
   let attempt = 0;
   while (attempt < retries) {
     try {
       return await fn();
     } catch (error: any) {
-      const status = error.status || error.code;
-      const message = error.message || '';
+      // Support various error structures from the SDK or raw API response
+      // The Gemini API often returns { error: { code: 429, status: "RESOURCE_EXHAUSTED", ... } }
+      const status = error.status || error.code || error?.error?.code;
+      const errorCodeStr = error?.error?.status || ""; // e.g. RESOURCE_EXHAUSTED
+      const message = error.message || error?.error?.message || "";
       
-      // Identify retryable errors: 429 (Too Many Requests) or 5xx (Server Errors)
+      // Identify retryable errors: 429 (Too Many Requests), 503 (Service Unavailable), or RESOURCE_EXHAUSTED
       const isRetryable = 
         status === 429 || 
         status === 503 || 
         status === 500 ||
+        errorCodeStr === "RESOURCE_EXHAUSTED" ||
         message.includes('429') || 
         message.includes('Quota') ||
-        message.includes('overloaded');
+        message.includes('overloaded') || 
+        message.includes('RESOURCE_EXHAUSTED');
 
-      if (isRetryable && attempt < retries - 1) {
-        // Exponential backoff
-        const delay = initialDelay * Math.pow(2, attempt);
-        console.warn(`[Gemini Service] Transient error (${status}). Retrying in ${delay}ms... (Attempt ${attempt + 1}/${retries})`);
-        await new Promise(r => setTimeout(r, delay));
-        attempt++;
-        continue;
+      if (isRetryable) {
+        if (attempt < retries - 1) {
+            // Exponential backoff with jitter to prevent thundering herd
+            const delay = initialDelay * Math.pow(2, attempt) + (Math.random() * 1000);
+            console.warn(`[Gemini Service] Transient error (${status || errorCodeStr}). Retrying in ${Math.floor(delay)}ms... (Attempt ${attempt + 1}/${retries})`);
+            await new Promise(r => setTimeout(r, delay));
+            attempt++;
+            continue;
+        } else {
+            // Friendly error message when max retries are hit for quota issues
+            console.error("[Gemini Service] Max retries exceeded for 429/Quota error.");
+            throw new Error("系統目前使用量較大或已達額度上限 (Quota Exceeded)，請稍後再試。");
+        }
       }
       
-      // Stop retrying if max attempts reached or error is fatal
+      // Stop retrying if error is not retryable (e.g., 400 Bad Request)
       throw error;
     }
   }
@@ -88,7 +99,8 @@ export const generateReport = async (
   wordCount: number = 500,
   tone: string = 'professional',
   includeTables: boolean = false,
-  includeCharts: boolean = false
+  includeCharts: boolean = false,
+  useGoogleSearch: boolean = false
 ): Promise<string> => {
   
   // 1. Construct the System Prompt
@@ -114,6 +126,10 @@ export const generateReport = async (
       ? `4. **圖表 (Charts):** 主動識別適合視覺化的數據並製作 Mermaid.js 圖表 (pie, xychart-beta, flowchart)。每個圖表前必須提供數據來源表格。`
       : `4. **圖表 (Charts):** 本次報告**不製作**任何 Mermaid 圖表。`;
 
+  const searchInstruction = useGoogleSearch
+      ? `6. **搜尋資料:** 務必善用 Google Search 工具來補充最新的相關產業資訊、競業數據或法規動態。若有引用搜尋結果，請確保資訊準確。`
+      : ``;
+
   const systemPrompt = `
 # Role
 你是一名【資深 ESG 永續報告書顧問】。任務是撰寫符合 GRI Standards 2021 與 SASB 標準的草稿。
@@ -137,6 +153,7 @@ ${toneInstruction}
 ${tableInstruction}
 ${chartInstruction}
 5. **Multimodal:** 整合附件與連結中的資訊。
+${searchInstruction}
 
 # User Data
 ${rawInput}
@@ -157,7 +174,14 @@ ${urlContext}
     ...fileParts.map(p => p.inlineData ? { inlineData: p.inlineData } : { text: p.text || '' })
   ];
 
-  // 4. API Call
+  // 4. Configure Tools
+  const tools: Tool[] = [];
+  // Add Google Search if requested OR if URLs are provided (to crawl them)
+  if (useGoogleSearch || urls.length > 0) {
+      tools.push({ googleSearch: {} });
+  }
+
+  // 5. API Call
   try {
     const response = await callWithRetry(async () => {
       return await ai.models.generateContent({
@@ -165,18 +189,40 @@ ${urlContext}
         contents: { parts },
         config: {
           thinkingConfig: { thinkingBudget: THINKING_BUDGET },
-          tools: [{ googleSearch: {} }] // Enable search for URL context
+          tools: tools.length > 0 ? tools : undefined
         }
       });
     });
 
-    return response.text || "No response generated.";
+    let finalText = response.text || "No response generated.";
+
+    // 6. Handle Grounding Metadata (Citations)
+    // "If Google Search is used, you MUST ALWAYS extract the URLs from groundingChunks and list them on the web app."
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
+    if (groundingMetadata?.groundingChunks) {
+        const uniqueSources = new Set<string>();
+        const sourceList: string[] = [];
+
+        groundingMetadata.groundingChunks.forEach((chunk: any) => {
+            if (chunk.web?.uri && chunk.web?.title) {
+                const sourceEntry = `- [${chunk.web.title}](${chunk.web.uri})`;
+                if (!uniqueSources.has(chunk.web.uri)) {
+                    uniqueSources.add(chunk.web.uri);
+                    sourceList.push(sourceEntry);
+                }
+            }
+        });
+
+        if (sourceList.length > 0) {
+            finalText += `\n\n### Google Search Sources (資料來源)\n${sourceList.join('\n')}`;
+        }
+    }
+
+    return finalText;
   } catch (error: any) {
     console.error("Report Generation Error:", error);
-    if (error.status === 429 || (error.message && error.message.includes('429'))) {
-       throw new Error("系統忙碌中 (Quota Exceeded)。請稍後再試。");
-    }
-    throw new Error("Failed to generate report: " + (error.message || "Unknown error"));
+    // Re-throw the friendly error message if it was normalized by callWithRetry
+    throw error;
   }
 };
 
@@ -204,6 +250,8 @@ export class ReportAssistant {
 
   constructor(currentReport: string, standardContext: string, companyName: string) {
     // Initialize Chat with Gemini 3 Pro + Limited Thinking Budget
+    // Note: Google Search is not explicitly enabled for the chat session here to keep it focused on editing existing text,
+    // but could be enabled if needed.
     this.chat = ai.chats.create({
       model: MODEL_ID, 
       config: {
@@ -297,8 +345,9 @@ export class ReportAssistant {
 
     } catch (error: any) {
       console.error("Chat Interaction Error:", error);
-      if (error.status === 429 || (error.message && error.message.includes('429'))) {
-        return { responseText: "系統忙碌中 (Quota Exceeded)。請稍後再試。" };
+      // If error message is the friendly one thrown by callWithRetry, use it.
+      if (error.message && (error.message.includes('Quota') || error.message.includes('系統'))) {
+         return { responseText: error.message };
       }
       return { responseText: "抱歉，處理您的請求時發生錯誤。" };
     }

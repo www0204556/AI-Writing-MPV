@@ -22,6 +22,9 @@ const App: React.FC = () => {
   const [includeTables, setIncludeTables] = useState<boolean>(false);
   const [includeCharts, setIncludeCharts] = useState<boolean>(false);
 
+  // Data Source Settings
+  const [useGoogleSearch, setUseGoogleSearch] = useState<boolean>(false);
+
   const [files, setFiles] = useState<File[]>([]);
   // URL State
   const [urls, setUrls] = useState<string[]>([]);
@@ -75,8 +78,8 @@ const App: React.FC = () => {
   };
 
   const handleGenerate = async () => {
-    if (!rawInput.trim() && files.length === 0 && urls.length === 0) {
-      alert("請輸入揭露資訊、上傳參考資料或提供網頁連結 (Please enter valid information, upload documents, or provide links)");
+    if (!rawInput.trim() && files.length === 0 && urls.length === 0 && !useGoogleSearch) {
+      alert("請至少提供一項資料來源：輸入文字、上傳檔案、提供連結或啟用 Google 搜尋。");
       return;
     }
 
@@ -112,7 +115,8 @@ const App: React.FC = () => {
         targetWordCount,
         tone,
         includeTables,
-        includeCharts
+        includeCharts,
+        useGoogleSearch // Pass the search preference
       );
       setGeneratedReport(report);
       
@@ -371,29 +375,40 @@ const App: React.FC = () => {
                 </div>
             </div>
 
-            {/* Format Settings */}
-            <div className="space-y-3 pt-2">
+            {/* Data Source & Format Settings */}
+            <div className="pt-2">
                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
-                    格式設定 (Format)
+                    功能設定 (Settings)
                 </label>
-                <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
-                    <input
-                    type="checkbox"
-                    className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
-                    checked={includeTables}
-                    onChange={(e) => setIncludeTables(e.target.checked)}
-                    />
-                    <span className="ml-2 text-sm text-gray-700 font-medium">包含數據表格 (Tables)</span>
-                </label>
-                <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
-                    <input
-                    type="checkbox"
-                    className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
-                    checked={includeCharts}
-                    onChange={(e) => setIncludeCharts(e.target.checked)}
-                    />
-                    <span className="ml-2 text-sm text-gray-700 font-medium">包含分析圖表 (Charts)</span>
-                </label>
+                <div className="space-y-1">
+                    <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
+                        <input
+                        type="checkbox"
+                        className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
+                        checked={useGoogleSearch}
+                        onChange={(e) => setUseGoogleSearch(e.target.checked)}
+                        />
+                        <span className="ml-2 text-sm text-gray-700 font-medium">使用 Google 搜尋補充資料 (Google Search)</span>
+                    </label>
+                    <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
+                        <input
+                        type="checkbox"
+                        className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
+                        checked={includeTables}
+                        onChange={(e) => setIncludeTables(e.target.checked)}
+                        />
+                        <span className="ml-2 text-sm text-gray-700 font-medium">包含數據表格 (Tables)</span>
+                    </label>
+                    <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
+                        <input
+                        type="checkbox"
+                        className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
+                        checked={includeCharts}
+                        onChange={(e) => setIncludeCharts(e.target.checked)}
+                        />
+                        <span className="ml-2 text-sm text-gray-700 font-medium">包含分析圖表 (Charts)</span>
+                    </label>
+                </div>
             </div>
           </div>
 
