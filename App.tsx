@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { StandardType, ChatMessage } from './types';
 import { generateReport, retrieveContext, ReportAssistant } from './services/geminiService';
 import MarkdownViewer from './components/MarkdownViewer';
@@ -13,11 +13,14 @@ const App: React.FC = () => {
   const [standardSearchTerm, setStandardSearchTerm] = useState<string>(''); // For searching standards
 
   const [rawInput, setRawInput] = useState<string>('');
-  const [targetWordCount, setTargetWordCount] = useState<number>(800);
+  const [targetWordCount, setTargetWordCount] = useState<number>(500); // Default adjusted to 500
   
-  // Content Settings
-  const [includeTables, setIncludeTables] = useState<boolean>(true);
-  const [includeCharts, setIncludeCharts] = useState<boolean>(true);
+  // Tone Settings
+  const [tone, setTone] = useState<string>('professional');
+
+  // Format Settings - Defaults set to false as requested
+  const [includeTables, setIncludeTables] = useState<boolean>(false);
+  const [includeCharts, setIncludeCharts] = useState<boolean>(false);
 
   const [files, setFiles] = useState<File[]>([]);
   // URL State
@@ -36,13 +39,6 @@ const App: React.FC = () => {
   const assistantRef = useRef<ReportAssistant | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Initialize Assistant when report is generated
-  useEffect(() => {
-    if (generatedReport && retrievedContext && !assistantRef.current) {
-        // Only initialize if not already exists
-    }
-  }, [generatedReport, retrievedContext]);
 
   // Handlers
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -100,45 +96,56 @@ const App: React.FC = () => {
     assistantRef.current = null;
 
     try {
-      // Step 1: "Retrieve" (Simulated RAG) - Now handles array
+      // Step 1: "Retrieve" (Simulated RAG)
       const context = retrieveContext(selectedStandards);
       setRetrievedContext(context);
 
-      // Step 2: "Generate" (Gemini API with Multimodal Support)
-      // Pass URLs, WordCount, and Table settings to the service
+      // Step 2: "Generate" (Gemini 3 Pro)
       const report = await generateReport(
         companyName,
-        reportingYear, // Pass the year
+        reportingYear,
         selectedStandards, 
         rawInput, 
         context, 
         files, 
         urls,
         targetWordCount,
+        tone,
         includeTables,
         includeCharts
       );
       setGeneratedReport(report);
       
-      // Initialize Assistant immediately with the fresh report
+      // Step 3: Initialize Assistant
+      // Done here explicitly to avoid race conditions with useEffect
       assistantRef.current = new ReportAssistant(report, context, companyName);
       
-      // Step 3: Trigger active "Proactive Greeting" from AI
-      // We send a hidden message to the AI asking it to analyze the report and greet the user proactively.
-      setIsChatProcessing(true); // Show little loading indicator in chat if visible
+      // Step 4: Proactive Greeting (Active Mode)
+      setIsChatProcessing(true);
       
-      const greetingResult = await assistantRef.current.sendMessage(
-        "請向使用者簡短打招呼(我是您的AI編輯助理)，然後根據目前報告文末的「待補充資訊清單」，主動且明確地詢問使用者是否能提供第一項缺漏的資訊 (請列出具體項目)。請保持語氣專業且友善。"
-      );
-      
-      setChatMessages([{ role: 'model', text: greetingResult.responseText }]);
-      setIsChatOpen(true);
-      setIsChatProcessing(false);
+      // Slight delay to ensure UI renders first
+      setTimeout(async () => {
+          if (assistantRef.current) {
+              try {
+                const greetingResult = await assistantRef.current.sendMessage(
+                    "請向使用者簡短打招呼(我是您的AI編輯助理)，然後根據目前報告文末的「待補充資訊清單」，主動且明確地詢問使用者是否能提供第一項缺漏的資訊 (請列出具體項目)。請保持語氣專業且友善。"
+                );
+                setChatMessages([{ role: 'model', text: greetingResult.responseText }]);
+                setIsChatOpen(true);
+              } catch (e) {
+                  console.error("Auto-greeting failed", e);
+              } finally {
+                  setIsChatProcessing(false);
+              }
+          }
+      }, 500);
 
     } catch (err: any) {
       setError(err.message || "An error occurred during generation.");
+      setIsLoading(false); // Stop loading only on error, otherwise let the greeting effect finish? No, better stop here.
     } finally {
-      setIsLoading(false);
+        if (!assistantRef.current) setIsLoading(false); // Only set loading false if we didn't go into the greeting flow, or simplify:
+        setIsLoading(false);
     }
   };
 
@@ -149,24 +156,28 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSendMessage = async (text: string) => {
+  const handleSendMessage = async (text: string, files: File[] = []) => {
     if (!assistantRef.current) return;
 
     setIsChatProcessing(true);
     
     // Optimistic UI update
-    setChatMessages(prev => [...prev, { role: 'user', text }]);
+    let userMsgText = text;
+    if (files.length > 0) {
+        userMsgText += `\n(已上傳 ${files.length} 個檔案)`;
+    }
+    setChatMessages(prev => [...prev, { role: 'user', text: userMsgText }]);
 
     try {
-      const result = await assistantRef.current.sendMessage(text);
+      // Pass files to the assistant service
+      const result = await assistantRef.current.sendMessage(text, files);
       
       // Update Report if tool was called
       if (result.updatedReport) {
         setGeneratedReport(result.updatedReport);
         setChatMessages(prev => [
             ...prev, 
-            { role: 'model', text: result.responseText },
-            // { role: 'model', text: "Report updated.", isSystem: true } // Optional system msg
+            { role: 'model', text: result.responseText }
         ]);
       } else {
         setChatMessages(prev => [...prev, { role: 'model', text: result.responseText }]);
@@ -196,98 +207,105 @@ const App: React.FC = () => {
 
   const gri2Options = getStandards("GRI 2-");
   const gri3Options = getStandards("GRI 3-");
-  const gri200Options = getStandards("GRI 2", "GRI 2-"); // Starts with GRI 2 but NOT GRI 2-
-  const gri300Options = getStandards("GRI 3", "GRI 3-"); // Starts with GRI 3 but NOT GRI 3-
+  const gri200Options = getStandards("GRI 2", "GRI 2-"); 
+  const gri300Options = getStandards("GRI 3", "GRI 3-"); 
   const gri400Options = getStandards("GRI 4");
 
   const renderCheckboxGroup = (title: string, options: string[]) => {
     const filtered = filterOptions(options);
-    if (filtered.length === 0) return null; // Don't render empty groups
+    if (filtered.length === 0) return null; 
 
     return (
-      <div className="mb-4">
-        <p className="text-xs font-bold text-gray-500 px-2 py-1 bg-gray-100 uppercase sticky top-0 z-10">{title}</p>
-        {filtered.map(opt => (
-          <label key={opt} className="flex items-start p-2 hover:bg-leaf-50 rounded cursor-pointer transition-colors">
-            <input 
-              type="checkbox" 
-              className="mt-1 h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded flex-shrink-0"
-              checked={selectedStandards.includes(opt as StandardType)}
-              onChange={() => handleStandardToggle(opt as StandardType)}
-            />
-            {/* Highlight match if searching */}
-            <span className={`ml-2 text-sm ${standardSearchTerm ? 'text-gray-900 font-medium' : 'text-gray-700'}`}>
-              {opt}
-            </span>
-          </label>
-        ))}
+      <div className="mb-6">
+        <p className="text-xs font-bold text-gray-500 px-3 py-1.5 bg-gray-100 rounded-lg uppercase sticky top-0 z-10 backdrop-blur-sm bg-opacity-90">{title}</p>
+        <div className="mt-2 space-y-1">
+          {filtered.map(opt => (
+            <label key={opt} className="flex items-start p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors group">
+              <input 
+                type="checkbox" 
+                className="mt-1 h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded transition-colors group-hover:border-leaf-400"
+                checked={selectedStandards.includes(opt as StandardType)}
+                onChange={() => handleStandardToggle(opt as StandardType)}
+              />
+              <span className={`ml-2 text-sm leading-relaxed ${standardSearchTerm ? 'text-gray-900 font-medium' : 'text-gray-600 group-hover:text-gray-900'}`}>
+                {opt}
+              </span>
+            </label>
+          ))}
+        </div>
       </div>
     );
   };
 
   return (
-    <div className="flex h-screen flex-col md:flex-row bg-gray-100 overflow-hidden font-sans relative">
+    <div className="flex h-screen flex-col md:flex-row bg-[#F8F9FB] overflow-hidden font-sans relative text-gray-800">
       
       {/* LEFT COLUMN: Sidebar / Settings */}
-      <aside className="w-full md:w-1/3 lg:w-96 bg-white border-r border-gray-200 flex flex-col h-full shadow-lg z-10 flex-shrink-0">
-        <div className="p-6 bg-leaf-600 text-white">
-          <h1 className="text-xl font-bold flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-            永續報告書 by AI
+      <aside className="w-full md:w-1/3 lg:w-[420px] bg-white border-r border-gray-100 flex flex-col h-full shadow-lg shadow-gray-200/50 z-20 flex-shrink-0">
+        <div className="p-6 bg-white border-b border-gray-100">
+          <h1 className="text-xl font-bold flex items-center gap-2 text-leaf-800 tracking-tight">
+            <div className="p-2 bg-leaf-100 rounded-lg text-leaf-600">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+            </div>
+            AI Writing <span className="text-gray-400 font-normal text-sm ml-1">MVP</span>
           </h1>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-6 space-y-8 scroll-smooth">
           
-          {/* Company Name & Year - Row Layout */}
+          {/* Company Name & Year */}
           <div className="flex gap-4">
             <div className="flex-1">
-              <label className="block text-sm font-semibold text-gray-700 mb-2">
+              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
                 公司名稱
               </label>
               <input
                 type="text"
-                className="block w-full rounded-lg border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-leaf-500 focus:ring-leaf-500 border outline-none"
-                placeholder="範例科技"
+                className="block w-full rounded-xl border-0 bg-gray-50 p-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none placeholder:text-gray-400"
+                placeholder="例如：範例科技股份有限公司"
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
               />
             </div>
             <div className="w-1/3">
-              <label className="block text-sm font-semibold text-gray-700 mb-2">
-                報告年度
+              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+                年度
               </label>
-              <select
-                value={reportingYear}
-                onChange={(e) => setReportingYear(e.target.value)}
-                className="block w-full rounded-lg border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-leaf-500 focus:ring-leaf-500 border outline-none"
-              >
-                <option value="2023">2023</option>
-                <option value="2024">2024</option>
-                <option value="2025">2025</option>
-                <option value="2026">2026</option>
-              </select>
+              <div className="relative">
+                <select
+                  value={reportingYear}
+                  onChange={(e) => setReportingYear(e.target.value)}
+                  className="block w-full appearance-none rounded-xl border-0 bg-gray-50 p-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none cursor-pointer"
+                >
+                  <option value="2023">2023</option>
+                  <option value="2024">2024</option>
+                  <option value="2025">2025</option>
+                  <option value="2026">2026</option>
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-gray-500">
+                   <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Standard Selector (Search + List) */}
+          {/* Standard Selector */}
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              揭露項目 (可複選)
+            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+              揭露項目 <span className="text-leaf-600 font-normal normal-case ml-1">(已選 {selectedStandards.length} 項)</span>
             </label>
             
-            {/* Search Box */}
-            <div className="relative mb-2">
-              <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                <svg className="w-4 h-4 text-gray-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20">
+            <div className="relative mb-3 group">
+              <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none transition-colors group-focus-within:text-leaf-500">
+                <svg className="w-4 h-4 text-gray-400" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20">
                     <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m19 19-4-4m0-7A7 7 0 1 1 1 8a7 7 0 0 1 14 0Z"/>
                 </svg>
               </div>
               <input 
                 type="text" 
-                className="block w-full p-2 pl-10 text-sm text-gray-900 border border-gray-300 rounded-lg bg-gray-50 focus:ring-leaf-500 focus:border-leaf-500 outline-none" 
+                className="block w-full rounded-xl border-0 bg-gray-50 py-2.5 pl-10 pr-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none" 
                 placeholder="搜尋準則 (如: 305, 溫室氣體...)"
                 value={standardSearchTerm}
                 onChange={(e) => setStandardSearchTerm(e.target.value)}
@@ -302,28 +320,26 @@ const App: React.FC = () => {
               )}
             </div>
 
-            <div className="border border-gray-300 rounded-lg bg-gray-50 max-h-60 overflow-y-auto p-2">
-              {renderCheckboxGroup("GRI 2: 一般揭露 (General Disclosures)", gri2Options)}
-              {renderCheckboxGroup("GRI 3: 重大主題 (Material Topics)", gri3Options)}
+            <div className="border border-gray-200 rounded-2xl bg-white max-h-64 overflow-y-auto p-3 shadow-sm scrollbar-thin">
+              {renderCheckboxGroup("GRI 2: 一般揭露 (General)", gri2Options)}
+              {renderCheckboxGroup("GRI 3: 重大主題 (Material)", gri3Options)}
               {renderCheckboxGroup("GRI 200: 經濟 (Economic)", gri200Options)}
               {renderCheckboxGroup("GRI 300: 環境 (Environmental)", gri300Options)}
               {renderCheckboxGroup("GRI 400: 社會 (Social)", gri400Options)}
               
-              {/* Fallback if no results */}
               {standardSearchTerm && 
                filterOptions([...gri2Options, ...gri3Options, ...gri200Options, ...gri300Options, ...gri400Options]).length === 0 && (
-                <div className="p-4 text-center text-gray-500 text-sm">
+                <div className="p-8 text-center text-gray-400 text-sm">
                   找不到符合 "{standardSearchTerm}" 的項目
                 </div>
                )}
             </div>
-            <p className="text-xs text-gray-500 mt-1">已選擇 {selectedStandards.length} 個項目</p>
           </div>
 
-          {/* Configuration: Word Count & Charts */}
+          {/* Configuration: Word Count, Tone, Format */}
           <div className="space-y-4">
             <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
                     預計中文字數
                 </label>
                 <input
@@ -332,90 +348,104 @@ const App: React.FC = () => {
                     step={100}
                     value={targetWordCount}
                     onChange={(e) => setTargetWordCount(Number(e.target.value))}
-                    className="block w-full rounded-lg border-gray-300 bg-gray-50 p-2.5 text-sm focus:border-leaf-500 focus:ring-leaf-500 border outline-none"
+                    className="block w-full rounded-xl border-0 bg-gray-50 p-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none"
                 />
             </div>
             <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    產出內容設定
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+                    撰寫語氣 (Tone)
                 </label>
-                <div className="flex gap-4">
-                  <label className="flex items-center space-x-2 cursor-pointer bg-white px-3 py-2 border border-gray-200 rounded-lg flex-1 hover:border-leaf-400 transition-colors">
-                      <input 
-                          type="checkbox" 
-                          checked={includeTables}
-                          onChange={(e) => setIncludeTables(e.target.checked)}
-                          className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
-                      />
-                      <span className="text-sm text-gray-700">包含數據表格</span>
-                  </label>
-                  <label className="flex items-center space-x-2 cursor-pointer bg-white px-3 py-2 border border-gray-200 rounded-lg flex-1 hover:border-leaf-400 transition-colors">
-                      <input 
-                          type="checkbox" 
-                          checked={includeCharts}
-                          onChange={(e) => setIncludeCharts(e.target.checked)}
-                          className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
-                      />
-                      <span className="text-sm text-gray-700">包含統計圖表</span>
-                  </label>
+                <div className="relative">
+                  <select
+                    value={tone}
+                    onChange={(e) => setTone(e.target.value)}
+                    className="block w-full appearance-none rounded-xl border-0 bg-gray-50 p-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none cursor-pointer"
+                  >
+                    <option value="professional">專業合規型 (Professional)</option>
+                    <option value="analytical">管理分析型 (Analytical)</option>
+                    <option value="brand">品牌溝通型 (Brand Communication)</option>
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-gray-500">
+                     <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
+                  </div>
                 </div>
+            </div>
+
+            {/* Format Settings */}
+            <div className="space-y-3 pt-2">
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+                    格式設定 (Format)
+                </label>
+                <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
+                    <input
+                    type="checkbox"
+                    className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
+                    checked={includeTables}
+                    onChange={(e) => setIncludeTables(e.target.checked)}
+                    />
+                    <span className="ml-2 text-sm text-gray-700 font-medium">包含數據表格 (Tables)</span>
+                </label>
+                <label className="flex items-center p-2 hover:bg-leaf-50 rounded-xl cursor-pointer transition-colors">
+                    <input
+                    type="checkbox"
+                    className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
+                    checked={includeCharts}
+                    onChange={(e) => setIncludeCharts(e.target.checked)}
+                    />
+                    <span className="ml-2 text-sm text-gray-700 font-medium">包含分析圖表 (Charts)</span>
+                </label>
             </div>
           </div>
 
+          <div className="h-px bg-gray-100 my-4"></div>
+
           {/* Input Area */}
           <div className="flex-1 flex flex-col min-h-[150px]">
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              輸入文字資料 (Input Data)
+            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+              文字資料輸入 (Data Input)
             </label>
             <textarea
-              className="w-full flex-1 rounded-lg border border-gray-300 bg-white p-3 text-sm text-gray-900 focus:border-leaf-500 focus:ring-leaf-500 resize-none shadow-inner outline-none"
-              placeholder={`請輸入欲請AI整合的文字資料`}
+              className="w-full flex-1 rounded-2xl border-0 bg-gray-50 p-4 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 resize-none shadow-sm transition-all outline-none"
+              placeholder={`請在此貼上欲整合的原始文字資料...`}
               value={rawInput}
               onChange={(e) => setRawInput(e.target.value)}
             />
           </div>
 
-          {/* URL Input Area */}
+          {/* URL Input */}
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              網頁連結 (Web Links)
+            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+              網頁連結 (Reference URLs)
             </label>
             <div className="flex gap-2">
               <input 
                 type="text"
-                className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-leaf-500 focus:ring-leaf-500 outline-none"
-                placeholder="https://example.com/esg-report"
+                className="flex-1 rounded-xl border-0 bg-gray-50 px-4 py-2.5 text-sm ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 outline-none transition-all"
+                placeholder="https://..."
                 value={currentUrl}
                 onChange={(e) => setCurrentUrl(e.target.value)}
                 onKeyDown={(e) => { if(e.key === 'Enter') handleAddUrl(e); }}
               />
               <button 
                 onClick={handleAddUrl}
-                className="bg-leaf-100 text-leaf-700 hover:bg-leaf-200 px-3 py-2 rounded-lg font-bold border border-leaf-300 transition-colors"
+                className="bg-gray-100 text-gray-600 hover:bg-leaf-100 hover:text-leaf-700 px-4 py-2 rounded-xl font-bold transition-all border border-gray-200 hover:border-leaf-200 active:scale-95"
               >
                 +
               </button>
             </div>
             
-            {/* URL List */}
             {urls.length > 0 && (
               <ul className="mt-3 space-y-2">
                 {urls.map((url, index) => (
-                  <li key={index} className="flex justify-between items-center bg-blue-50 px-3 py-2 rounded text-xs border border-blue-100">
-                    <div className="flex items-center truncate mr-2">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-400 mr-2 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <li key={index} className="flex justify-between items-center bg-blue-50/50 px-3 py-2 rounded-lg text-xs border border-blue-100/50">
+                    <div className="flex items-center truncate mr-2 text-blue-700">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 mr-2 flex-shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                       </svg>
-                      <a href={url} target="_blank" rel="noopener noreferrer" className="truncate text-blue-700 hover:underline">{url}</a>
+                      <a href={url} target="_blank" rel="noopener noreferrer" className="truncate hover:underline">{url}</a>
                     </div>
-                    <button 
-                      onClick={() => removeUrl(index)}
-                      className="text-red-400 hover:text-red-600 focus:outline-none"
-                      title="Remove"
-                    >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                    <button onClick={() => removeUrl(index)} className="text-blue-300 hover:text-red-500 transition-colors">
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
                   </li>
                 ))}
@@ -423,16 +453,14 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* File Upload Area */}
+          {/* File Upload */}
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              上傳參考資料 (Upload Reference Materials)
+            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+              參考資料上傳 (Files)
             </label>
-            
-            {/* Drop Zone / Button */}
             <div 
               onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-gray-300 rounded-lg p-4 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-50 hover:border-leaf-400 transition-colors group"
+              className="border-2 border-dashed border-gray-200 rounded-2xl p-6 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-50 hover:border-leaf-400 transition-all duration-300 group bg-white"
             >
               <input 
                 type="file" 
@@ -442,33 +470,28 @@ const App: React.FC = () => {
                 multiple 
                 accept="image/*,application/pdf,.docx,.xlsx,.xls"
               />
-              <svg className="h-8 w-8 text-gray-400 group-hover:text-leaf-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-              </svg>
-              <p className="text-xs text-gray-500 text-center">
-                <span className="font-semibold text-leaf-600">點擊上傳</span> PDF, Word, Excel, Images
+              <div className="p-3 bg-gray-50 rounded-full mb-3 group-hover:scale-110 transition-transform duration-300">
+                <svg className="h-6 w-6 text-gray-400 group-hover:text-leaf-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+              </div>
+              <p className="text-xs text-gray-500 text-center font-medium">
+                點擊上傳 PDF, Word, Excel, Images
               </p>
             </div>
 
-            {/* File List */}
             {files.length > 0 && (
               <ul className="mt-3 space-y-2">
                 {files.map((file, index) => (
-                  <li key={index} className="flex justify-between items-center bg-gray-50 px-3 py-2 rounded text-xs border border-gray-200">
+                  <li key={index} className="flex justify-between items-center bg-gray-50 px-3 py-2.5 rounded-xl text-xs border border-gray-100 shadow-sm">
                     <div className="flex items-center truncate mr-2">
                       <svg className="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                       </svg>
-                      <span className="truncate text-gray-700">{file.name}</span>
+                      <span className="truncate text-gray-700 font-medium">{file.name}</span>
                     </div>
-                    <button 
-                      onClick={() => removeFile(index)}
-                      className="text-red-400 hover:text-red-600 focus:outline-none"
-                      title="Remove"
-                    >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                    <button onClick={() => removeFile(index)} className="text-gray-400 hover:text-red-500 transition-colors">
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
                   </li>
                 ))}
@@ -476,108 +499,102 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Generate Button */}
-          <button
-            onClick={handleGenerate}
-            disabled={isLoading}
-            className={`w-full py-3 px-4 rounded-lg font-bold text-white shadow-md transition-all duration-200 transform active:scale-95 ${
-              isLoading 
-                ? 'bg-gray-400 cursor-not-allowed' 
-                : 'bg-leaf-600 hover:bg-leaf-700 hover:shadow-lg'
-            }`}
-          >
-            {isLoading ? (
-              <span className="flex items-center justify-center gap-2">
-                <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Processing...
-              </span>
-            ) : (
-              "產出初稿內容"
-            )}
-          </button>
+          <div className="pb-8">
+            <button
+                onClick={handleGenerate}
+                disabled={isLoading}
+                className={`w-full py-4 px-6 rounded-2xl font-bold text-white shadow-lg shadow-leaf-500/30 transition-all duration-300 transform active:scale-[0.98] ${
+                isLoading 
+                    ? 'bg-gray-400 cursor-not-allowed shadow-none' 
+                    : 'bg-gradient-to-r from-leaf-600 to-leaf-500 hover:to-leaf-600 hover:shadow-xl hover:shadow-leaf-500/40'
+                }`}
+            >
+                {isLoading ? (
+                <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    AI 撰寫中...
+                </span>
+                ) : (
+                "開始生成報告"
+                )}
+            </button>
+          </div>
         </div>
       </aside>
 
       {/* CENTER: Main Area / Result */}
-      <main className="flex-1 flex flex-col h-full bg-gray-100 overflow-hidden relative">
-        <header className="bg-white border-b border-gray-200 px-8 py-3 shadow-sm flex justify-center items-center z-10 flex-shrink-0 relative">
-          <div className="flex flex-col items-center">
-            <h2 className="text-lg font-bold text-gray-800">初稿預覽</h2>
-            <p className="text-xs text-gray-400 mt-0.5">初稿版本是 AI產製，有時可能會出錯，敬請自行查證。</p>
+      <main className="flex-1 flex flex-col h-full bg-[#F8F9FB] overflow-hidden relative">
+        <header className="bg-white/80 backdrop-blur-md border-b border-gray-100 px-8 py-4 shadow-sm z-10 flex-shrink-0 relative flex justify-between items-center h-[72px]">
+          <div className="flex flex-col items-center mx-auto">
+            <h2 className="text-base font-bold text-gray-800 tracking-wide">初稿預覽</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">初稿版本是 AI產製，有時可能會出錯，敬請自行查證。</p>
           </div>
-          <div className="flex gap-2 absolute right-8">
+          
+          <div className="flex gap-3 absolute right-8">
             {generatedReport && (
                 <>
                 <button
                     onClick={() => setIsChatOpen(!isChatOpen)}
-                    className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded border transition-colors ${
+                    className={`flex items-center gap-2 text-sm px-4 py-2 rounded-xl border transition-all duration-200 font-medium ${
                         isChatOpen 
-                        ? 'bg-leaf-100 text-leaf-800 border-leaf-300' 
-                        : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                        ? 'bg-leaf-50 text-leaf-700 border-leaf-200 shadow-inner' 
+                        : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:border-gray-300 shadow-sm'
                     }`}
                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-                    </svg>
-                    AI 編輯助理 {isChatOpen ? '(開啟中)' : ''}
+                    <div className={`w-2 h-2 rounded-full ${isChatOpen ? 'bg-leaf-500 animate-pulse' : 'bg-gray-300'}`}></div>
+                    AI 助理
                 </button>
                 <button
                 onClick={handleCopy}
-                className="text-sm px-3 py-1.5 rounded bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900 border border-gray-300 transition-colors"
+                className="text-sm px-4 py-2 rounded-xl bg-white text-gray-600 hover:text-gray-900 border border-gray-200 hover:border-gray-300 shadow-sm transition-all duration-200 font-medium active:scale-95"
                 >
-                複製到剪貼簿 (Copy)
+                複製
                 </button>
                 </>
             )}
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8 relative">
-          <div className="max-w-4xl mx-auto space-y-6">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 relative scrollbar-thin">
+          <div className="max-w-4xl mx-auto space-y-6 pb-20">
             
             {/* Error Message */}
             {error && (
-              <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded shadow-sm">
-                <div className="flex">
-                  <div className="flex-shrink-0">
-                    <svg className="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                    </svg>
-                  </div>
-                  <div className="ml-3">
-                    <p className="text-sm text-red-700">{error}</p>
-                  </div>
-                </div>
+              <div className="bg-red-50 border border-red-100 p-4 rounded-2xl shadow-sm flex items-start gap-3">
+                 <svg className="h-5 w-5 text-red-500 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+                <p className="text-sm text-red-700 leading-relaxed font-medium">{error}</p>
               </div>
             )}
 
             {/* Context Section (RAG Debug/Reference) */}
             {retrievedContext && (
               <ContextExpander 
-                title="參考標準原文 (Retrieved Standard Context)" 
+                title="參考標準原文 (Standard Context)" 
                 content={retrievedContext} 
               />
             )}
 
             {/* Main Result Section */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 min-h-[500px] flex flex-col">
+            <div className={`bg-white rounded-3xl shadow-xl shadow-gray-200/50 border border-white min-h-[600px] flex flex-col transition-all duration-500 ${generatedReport ? 'opacity-100 translate-y-0' : 'opacity-100'}`}>
               {generatedReport ? (
-                <div className="p-8">
+                <div className="p-8 md:p-12">
                   <MarkdownViewer content={generatedReport} />
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-gray-400 p-8">
-                  <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  <div className="w-20 h-20 bg-gray-50 rounded-3xl flex items-center justify-center mb-6 shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                     </svg>
                   </div>
-                  <p className="text-sm">尚未生成報告 (Report not generated yet)</p>
-                  <p className="text-xs mt-1 text-gray-300">
-                    請在左側輸入數據或上傳文件，並點擊生成按鈕。
+                  <p className="text-base font-medium text-gray-500">尚未生成報告</p>
+                  <p className="text-sm mt-2 text-gray-400 text-center max-w-xs leading-relaxed">
+                    請在左側輸入數據或上傳文件，<br/>並點擊「開始生成報告」按鈕。
                   </p>
                 </div>
               )}

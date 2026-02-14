@@ -9,8 +9,13 @@ const MermaidChart: React.FC<MermaidChartProps> = ({ chart }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<boolean>(false);
+  
+  // Track mounting status to prevent state updates on unmounted components
+  const isMounted = useRef(true);
 
   useEffect(() => {
+    isMounted.current = true;
+    
     mermaid.initialize({ 
         startOnLoad: false,
         theme: 'neutral',
@@ -18,22 +23,34 @@ const MermaidChart: React.FC<MermaidChartProps> = ({ chart }) => {
     });
 
     const renderChart = async () => {
+      if (!chart) return;
+      
       try {
+        // Ensure container exists before attempting render
         if (containerRef.current) {
           const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
-          const { svg } = await mermaid.render(id, chart);
-          setSvg(svg);
-          setError(false);
+          
+          // Mermaid rendering is async
+          const { svg: generatedSvg } = await mermaid.render(id, chart);
+          
+          if (isMounted.current) {
+            setSvg(generatedSvg);
+            setError(false);
+          }
         }
       } catch (err) {
         console.error('Mermaid rendering failed:', err);
-        setError(true);
+        if (isMounted.current) {
+            setError(true);
+        }
       }
     };
 
-    if (chart) {
-      renderChart();
-    }
+    renderChart();
+
+    return () => {
+        isMounted.current = false;
+    };
   }, [chart]);
 
   if (error) {

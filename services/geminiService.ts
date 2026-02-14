@@ -1,13 +1,22 @@
-import { GoogleGenAI, FunctionDeclaration, Type, Chat } from "@google/genai";
+import { GoogleGenAI, FunctionDeclaration, Type, Chat, Part } from "@google/genai";
 import { StandardType } from "../types";
 import { GRI_KNOWLEDGE_BASE } from "../data/griStandards";
 import { processFile, ProcessedPart } from "./fileProcessing";
 
+// Configuration Constants
+const MODEL_ID = 'gemini-3-pro-preview'; // Unified model for both tasks
+const THINKING_BUDGET = 1024; // Limited budget to ensure <10s latency while maintaining quality
+
 // Initialize Gemini Client
+// Ensure API key is present at runtime
+if (!process.env.API_KEY) {
+  console.error("API_KEY is missing from environment variables.");
+}
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
- * Helper function to retry API calls on 429 errors
+ * Robust retry mechanism for API calls.
+ * Handles transient network errors and rate limits (429).
  */
 const callWithRetry = async <T>(
   fn: () => Promise<T>, 
@@ -19,48 +28,54 @@ const callWithRetry = async <T>(
     try {
       return await fn();
     } catch (error: any) {
-      // Check for 429 (Resource Exhausted / Quota Exceeded)
-      const isQuotaError = 
-        error.status === 429 || 
-        error.code === 429 || 
-        (error.message && (error.message.includes('429') || error.message.includes('Quota')));
+      const status = error.status || error.code;
+      const message = error.message || '';
+      
+      // Identify retryable errors: 429 (Too Many Requests) or 5xx (Server Errors)
+      const isRetryable = 
+        status === 429 || 
+        status === 503 || 
+        status === 500 ||
+        message.includes('429') || 
+        message.includes('Quota') ||
+        message.includes('overloaded');
 
-      if (isQuotaError && attempt < retries - 1) {
+      if (isRetryable && attempt < retries - 1) {
+        // Exponential backoff
         const delay = initialDelay * Math.pow(2, attempt);
-        console.warn(`Gemini API 429 Error. Retrying in ${delay}ms... (Attempt ${attempt + 1}/${retries})`);
+        console.warn(`[Gemini Service] Transient error (${status}). Retrying in ${delay}ms... (Attempt ${attempt + 1}/${retries})`);
         await new Promise(r => setTimeout(r, delay));
         attempt++;
         continue;
       }
       
-      // If it's the last attempt or not a retryable error, throw it
-      if (attempt === retries - 1 || !isQuotaError) {
-        throw error;
-      }
+      // Stop retrying if max attempts reached or error is fatal
+      throw error;
     }
   }
-  throw new Error("Max retries exceeded");
+  throw new Error("Max retries exceeded for Gemini API call.");
 };
 
 /**
- * Simulates the RAG (Retrieval) step.
- * Now handles an array of standards.
+ * Simulates RAG (Retrieval) by mapping standard IDs to knowledge chunks.
  */
 export const retrieveContext = (standards: StandardType | StandardType[]): string => {
   const standardArray = Array.isArray(standards) ? standards : [standards];
   
-  const contexts = standardArray.map(std => {
+  if (standardArray.length === 0) return "";
+
+  // Optimize: Use map/join for efficient string concatenation
+  return standardArray.map(std => {
     const chunk = GRI_KNOWLEDGE_BASE[std];
     return chunk 
       ? `### [Standard: ${std}]\n${chunk.text}` 
-      : `### [Standard: ${std}]\nNo standard text found.`;
-  });
-
-  return contexts.join("\n\n");
+      : `### [Standard: ${std}]\n(No standard text found in knowledge base.)`;
+  }).join("\n\n");
 };
 
 /**
- * Generates the initial report.
+ * Generates the initial ESG report.
+ * Uses Gemini 3 Pro with a constrained thinking budget for speed.
  */
 export const generateReport = async (
   companyName: string,
@@ -70,130 +85,111 @@ export const generateReport = async (
   context: string,
   files: File[] = [],
   urls: string[] = [],
-  wordCount: number = 800,
-  includeTables: boolean = true,
-  includeCharts: boolean = true
+  wordCount: number = 500,
+  tone: string = 'professional',
+  includeTables: boolean = false,
+  includeCharts: boolean = false
 ): Promise<string> => {
   
-  if (!process.env.API_KEY) {
-    throw new Error("Missing API Key. Please ensure process.env.API_KEY is set.");
-  }
-
-  // Construct URL section for the prompt
+  // 1. Construct the System Prompt
+  const standardsList = standards.join(", ");
   const urlContext = urls.length > 0 
-    ? `\n\n# Reference URLs (參考網址)\nThe user has provided the following links as reference material. Please use the Google Search tool or your internal knowledge to retrieve relevant information from these links if possible to support the report generation:\n${urls.map(u => `- ${u}`).join('\n')}`
+    ? `\n\n# Reference URLs\n${urls.map(u => `- ${u}`).join('\n')}`
     : '';
 
-  const standardsList = standards.join(", ");
+  // Tone Logic
+  const toneMap: Record<string, string> = {
+    analytical: "語氣要求：管理分析型。強調數據背後的洞察、趨勢分析、以及風險與機會評估。內容應精簡有力。",
+    brand: "語氣要求：品牌溝通型。強調永續承諾與價值創造，語言通俗易懂，富有感染力，但嚴禁漂綠 (Greenwashing)。",
+    professional: "語氣要求：專業合規型。強調精準度、標準依循，使用正式術語，客觀且嚴謹。"
+  };
+  const toneInstruction = toneMap[tone] || toneMap['professional'];
+
+  // Format Logic
+  const tableInstruction = includeTables 
+      ? `3. **表格 (Tables):** 必須將關鍵數據整理為 Markdown 表格，清晰易讀。` 
+      : `3. **表格 (Tables):** 請勿使用 Markdown 表格，數據請以文字敘述呈現。`;
+
+  const chartInstruction = includeCharts
+      ? `4. **圖表 (Charts):** 主動識別適合視覺化的數據並製作 Mermaid.js 圖表 (pie, xychart-beta, flowchart)。每個圖表前必須提供數據來源表格。`
+      : `4. **圖表 (Charts):** 本次報告**不製作**任何 Mermaid 圖表。`;
 
   const systemPrompt = `
-# Role (角色設定)
-你是一位專業的 ESG 永續報告書資深顧問與稽核員。你的任務是協助企業 (${companyName || "公司名稱未提供"}) 依據 GRI 標準 (${standardsList}) 撰寫合規的揭露報告。
+# Role
+你是一名【資深 ESG 永續報告書顧問】。任務是撰寫符合 GRI Standards 2021 與 SASB 標準的草稿。
+公司: ${companyName || "[公司名稱]"} | 年度: ${reportingYear} | 目標字數: 約 ${wordCount} 字 | 準則: ${standardsList}
 
-# Context (檢索到的標準內容)
+# Context (GRI Standards)
 ${context}
 
-# Task (任務)
-請根據 [Context] 中的具體要求，將 [User Data] (包含文字輸入、附件檔案與參考網址) 改寫為一段正式的永續報告揭露文字。
-公司名稱: ${companyName || "[公司名稱]"}
-報告年度: ${reportingYear} (資料應主要涵蓋此年份，若有跨年度比較請註明)
-預計總字數: 約 ${wordCount} 個中文字。
+# Instructions
+${toneInstruction}
 
-# Constraints (Strict)
-1. **NO SUMMARY:** Do NOT provide an executive summary, introduction, or overview at the beginning. Start directly with the content for the first selected GRI standard.
-2. **Data Filtering & Synthesis:** The user may provide large amounts of text, files, or links. Your core task is to **filter** this noise. Only extract facts, figures, and descriptions that specifically answer the requirements of the selected GRI Standards (${standardsList}) for the reporting year ${reportingYear}. Discard irrelevant marketing fluff or general company history unless required by a specific standard (like GRI 2-1).
-3. **合規性檢查 & 缺漏標示:** 如果使用者數據缺少標準要求的關鍵項目，請在輸出中以粗體標示 **[敬請增補：缺少 XXX 資訊]**，並在文末的清單中列出。
-4. **語氣風格:** 專業、客觀、第三人稱（使用「${companyName}」或「本公司」）。嚴禁使用行銷用語。
-5. **結構與格式:**
-   - 使用 Markdown 格式。
-   - **GRI 標準標示位置 (極重要規定):** 
-     - **僅限標題:** GRI 揭露項目編號（如 GRI 2-1, GRI 305-1）**必須且只能** 標示在 Markdown 標題（#、##、###）的**最後方**。
-     - **內文禁止:** **嚴格禁止** 將 GRI 編號（如 \`[GRI 305-1]()\`）嵌入在一般的段落內文、句子或表格說明中。內文請專注於描述內容，完全不要提及標準編號。
-     - **格式:** 標示時請務必使用 Markdown 連結格式但不帶網址，例如 \`[GRI 305-1]()\`，以便系統將其渲染為藍色標籤。
-   - **禁止章節:** **絕對不要**包含「顧問建議」、「改善建議」或「揭露項目摘要」等章節。
-   - **待補充資訊:** 所有需要編輯者自行補充的資訊，請**統一整理在文末**的一個獨立區塊，標題為「### 待補充資訊清單」。
-   - **表格設定 (Tables):** ${includeTables ? "必須將關鍵數據整理為 Markdown 表格呈現 (例如：排放數據、人力數據)，表格應清晰易讀。" : "請勿使用任何 Markdown 表格。所有數據請以文字段落描述。"}
-   - **圖表設定 (Charts):** 
-     ${includeCharts ? 
-       `請主動識別適合視覺化的數據，並製作 Mermaid.js 圖表。
-       - **語法:** 使用 \`\`\`mermaid ... \`\`\` 程式碼區塊。
-       - **圖表類型優先順序:**
-         1. **圓餅圖 (pie):** 適合顯示比例。標題格式範例: \`pie title "標題"\` (標題務必加雙引號)。
-         2. **長條圖 (xychart-beta):** 請使用 \`xychart-beta\`。範例: \`xychart-beta \n title "標題" \n x-axis ["A", "B"] \n bar [10, 20]\`。
-         3. **流程圖 (flowchart):** **嚴禁**在 ID 或 subgraph 名稱中直接使用括號 \`()\`。若需顯示特殊文字，請務必使用 \`id["文字"]\` 或 \`subgraph id ["文字"]\` 格式。
-       - **數據源:** **每個 Mermaid 圖表之前，必須先提供該圖表的「數據來源表格」**，以便使用者複製到 Word。` 
-       : "請勿產生任何圖表或 Mermaid 程式碼。"}
-   - 必須明確引用標準條號。
-6. **禁止幻覺:** 絕對不要捏造數據。
-7. **多模態輸入:** 如果有提供附件（圖片、PDF、Excel 等）或網址，請務必解析並整合其中的數據與資訊。
+# Hard Rules
+1. **No Hallucinations:** 若無數據，記在文末「### 待補充資訊清單」，絕不可捏造。
+2. **Citations:** 每段落需標註依據標準 (如: 依據 GRI 305-1...)。
+3. **Perspective:** 使用第三人稱客觀語氣。
 
-# Output Structure (輸出結構)
-1. **揭露內容 (Data & Description):**
-   - 直接開始，不需前言。
-   - 整合所有選擇的標準內容。
-   - ${includeTables ? "包含數據表格。" : "純文字描述數據。"}
-   - ${includeCharts ? "包含 Mermaid 圖表 (附帶數據源表格)。" : ""}
-2. **待補充資訊清單:** (若有缺漏資訊，請列在此處，每一項請明確指出缺少什麼數據)
+# Formatting
+1. **Markdown Structure:** 直接切入準則內容。
+2. **UI Tags:** 標題後方必須加上 \`[GRI XXX-X]()\` 以觸發 UI 藍色標籤 (例: \`### 排放數據 [GRI 305-1]()\`)。
+3. **Missing Info:** 缺漏資訊列於文末。
+${tableInstruction}
+${chartInstruction}
+5. **Multimodal:** 整合附件與連結中的資訊。
 
-# User Data (使用者提供的原始數據與說明)
+# User Data
 ${rawInput}
 ${urlContext}
 `;
 
+  // 2. Process Files
+  const fileParts: ProcessedPart[] = [];
+  if (files.length > 0) {
+      // Execute in parallel for speed
+      const processedResults = await Promise.all(files.map(file => processFile(file)));
+      fileParts.push(...processedResults);
+  }
+
+  // 3. Assemble Request Parts
+  const parts: Part[] = [
+    { text: systemPrompt },
+    ...fileParts.map(p => p.inlineData ? { inlineData: p.inlineData } : { text: p.text || '' })
+  ];
+
+  // 4. API Call
   try {
-    const fileParts: ProcessedPart[] = [];
-    if (files.length > 0) {
-        for (const file of files) {
-            const part = await processFile(file);
-            fileParts.push(part);
-        }
-    }
-
-    const parts = [
-      { text: systemPrompt },
-      ...fileParts.map(p => p.inlineData ? { inlineData: p.inlineData } : { text: p.text || '' })
-    ];
-
-    // Wrap the API call with retry logic
     const response = await callWithRetry(async () => {
-      // Using gemini-3-pro-preview with low thinking budget for quality balance
       return await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: MODEL_ID,
         contents: { parts },
         config: {
-          // Set a modest thinking budget (1024 tokens) to improve quality without taking too long (approx 5-10s)
-          thinkingConfig: { thinkingBudget: 1024 },
-          // Enable Google Search to handle URLs or external info verification
-          tools: [{ googleSearch: {} }] 
+          thinkingConfig: { thinkingBudget: THINKING_BUDGET },
+          tools: [{ googleSearch: {} }] // Enable search for URL context
         }
       });
     });
 
     return response.text || "No response generated.";
   } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    
-    // Provide a user-friendly error message for 429
+    console.error("Report Generation Error:", error);
     if (error.status === 429 || (error.message && error.message.includes('429'))) {
-       throw new Error("系統忙碌中 (Quota Exceeded)。請稍後再試，或檢查您的 API Key 額度限制。");
+       throw new Error("系統忙碌中 (Quota Exceeded)。請稍後再試。");
     }
-    
-    throw new Error("Failed to generate report. " + (error.message || "Please check your API key and connection."));
+    throw new Error("Failed to generate report: " + (error.message || "Unknown error"));
   }
 };
 
-/**
- * Tool Definition for Updating Report
- */
+// Tool Definition for UI Updates
 const updateReportTool: FunctionDeclaration = {
   name: 'updateReport',
-  description: 'Overwrites the current report with new content based on user instructions. Use this whenever the user asks to modify, edit, or change the report.',
+  description: 'Overwrites the current report with new content. Use when modifying, editing, or adding data to the report.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       newContent: {
         type: Type.STRING,
-        description: 'The full, updated markdown content of the report.',
+        description: 'The full, updated markdown content.',
       },
     },
     required: ['newContent'],
@@ -201,105 +197,110 @@ const updateReportTool: FunctionDeclaration = {
 };
 
 /**
- * Class to manage a persistent chat session for report refinement
+ * Manages the persistent chat session.
  */
 export class ReportAssistant {
   private chat: Chat;
 
   constructor(currentReport: string, standardContext: string, companyName: string) {
-    // Keeping Chat on Flash for responsiveness, but instructed to be proactive about missing info
+    // Initialize Chat with Gemini 3 Pro + Limited Thinking Budget
     this.chat = ai.chats.create({
-      model: 'gemini-3-flash-preview', 
+      model: MODEL_ID, 
       config: {
-        thinkingConfig: { thinkingBudget: 0 }, 
-        systemInstruction: `You are a proactive AI Editor Assistant for ESG reports for ${companyName}. 
+        thinkingConfig: { thinkingBudget: THINKING_BUDGET }, 
+        systemInstruction: `你是一名【資深 ESG 顧問】。任務是協助使用者完善 GRI/SASB 報告。
+        公司: ${companyName}
+
+        # 核心規則
+        1. **拒絕幻覺:** 若無數據，請使用者提供，不可捏造。
+        2. **格式:** 更新報告時，標題後方保留 \`[GRI XXX-X]()\` 標籤。
+        3. **工具:** 若需修改報告內容，務必呼叫 \`updateReport\` 工具。
         
-        Current Context:
-        - You have a draft report.
-        - You have the raw standard text.
-        
-        Your Specific Mission (High Priority):
-        1. **Check for Missing Info:** Immediately look at the '### 待補充資訊清單' (Missing Information List) at the bottom of the current report.
-        2. **Proactive Reminder:** Your goal is to help the user complete the report. 
-           - **Do not wait for the user to ask.**
-           - In your very first message (and subsequent ones), you MUST identify the first unresolved item in the missing list and politely ask the user to provide it.
-           - Example: "I noticed we are missing the GWP source for Scope 1. Do you have that information?"
-           - Guide them item by item.
-        3. **Assist & Update:** When the user provides the info, generate the FULL updated report (incorporating the new info and removing the item from the missing list) and call the 'updateReport' tool.
-        4. **GRI Formatting Rules (CRITICAL):** 
-           - **Headers Only:** GRI tags like \`[GRI 305-1]()\` MUST ONLY appear at the end of markdown headers (e.g., \`### Emission Data [GRI 305-1]()\`).
-           - **No Body Tags:** NEVER put GRI tags inside body paragraphs or sentences.
-           - **Blue Style:** Always use the empty link syntax \`[]()\` for the tags to maintain blue styling.
-        
-        If the report is complete (no missing list), then you can help refine tone or format.
+        # 你的策略 (High Priority)
+        1. **檢查缺漏:** 檢視文末 '### 待補充資訊清單'。
+        2. **主動引導:** 每次對話優先詢問清單中的第一個缺漏項目。
+        3. **執行更新:** 收到數據後，產生完整新報告並呼叫工具。
         `,
         tools: [{ functionDeclarations: [updateReportTool] }],
       },
       history: [
         {
           role: 'user',
-          parts: [{ text: `Here is the current draft of the report:\n\n${currentReport}` }],
+          parts: [{ text: `這是目前的報告初稿:\n\n${currentReport}` }],
         },
         {
           role: 'model',
-          parts: [{ text: "收到。我已經檢視了初稿。" }], // Default context, will be overridden by immediate user prompt or initial call
+          parts: [{ text: "收到。我已經檢視了初稿，隨時準備協助您補充缺失資訊或修潤內容。" }], 
         }
       ]
     });
   }
 
-  /**
-   * Sends a message to the assistant.
-   * Returns an object containing the text response AND/OR the new report content if a tool was called.
-   */
-  async sendMessage(message: string): Promise<{ responseText: string, updatedReport?: string }> {
+  async sendMessage(message: string, files: File[] = []): Promise<{ responseText: string, updatedReport?: string }> {
     try {
-      // Wrap chat message with retry logic
+      // 1. Prepare Input Parts
+      const parts: Part[] = [];
+      
+      if (files.length > 0) {
+        const processedFiles = await Promise.all(files.map(f => processFile(f)));
+        for (const pf of processedFiles) {
+          if (pf.inlineData) parts.push({ inlineData: pf.inlineData });
+          if (pf.text) parts.push({ text: pf.text });
+        }
+      }
+      
+      parts.push({ text: message });
+
+      // 2. Send Message with Retry
       const response = await callWithRetry(async () => {
-        return await this.chat.sendMessage({ message });
+        return await this.chat.sendMessage({ message: parts });
       });
       
       let responseText = response.text || "";
       let updatedReport: string | undefined;
 
-      // Check for function calls
+      // 3. Handle Tool Calls
       const functionCalls = response.functionCalls;
       if (functionCalls && functionCalls.length > 0) {
-        const functionResponseParts = [];
+        const functionResponseParts: Part[] = [];
 
         for (const call of functionCalls) {
           if (call.name === 'updateReport') {
             updatedReport = call.args['newContent'] as string;
             
-            // Pass the ID back if available to strictly follow tool protocol
+            // Ack the tool execution
             functionResponseParts.push({
               functionResponse: {
                 name: call.name,
-                response: { result: "Report successfully updated in the UI." },
+                response: { result: "Success" },
                 id: call.id
               }
             });
           }
         }
 
+        // 4. Send Tool Response back to model (Close the loop)
         if (functionResponseParts.length > 0) {
-            // Send tool response back to model to close the loop
-            // Wrap tool response with retry logic too
             const toolResponse = await callWithRetry(async () => {
                 return await this.chat.sendMessage({ message: functionResponseParts });
             });
-            responseText = toolResponse.text || "Report updated.";
+            // If the model generates follow-up text after tool use, append it
+            if (toolResponse.text) {
+                responseText = toolResponse.text;
+            } else if (!responseText) {
+                responseText = "報告已更新。";
+            }
         }
       }
 
       return { responseText, updatedReport };
 
     } catch (error: any) {
-      console.error("Chat Error:", error);
+      console.error("Chat Interaction Error:", error);
       if (error.status === 429 || (error.message && error.message.includes('429'))) {
         return { responseText: "系統忙碌中 (Quota Exceeded)。請稍後再試。" };
       }
-      return { responseText: "Sorry, I encountered an error processing your request." };
+      return { responseText: "抱歉，處理您的請求時發生錯誤。" };
     }
   }
 }
