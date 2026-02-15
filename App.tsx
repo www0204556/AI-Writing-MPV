@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { Toaster, toast } from 'react-hot-toast';
 import { StandardType, ChatMessage } from './types';
 import { generateReport, retrieveContext, ReportAssistant } from './services/geminiService';
 import MarkdownViewer from './components/MarkdownViewer';
@@ -35,6 +36,9 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   
+  // Validation State
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
   // Chat State
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -43,11 +47,46 @@ const App: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Validation Logic
+  const validateForm = () => {
+    const newErrors: Record<string, string> = {};
+    let isValid = true;
+
+    if (!companyName.trim()) {
+      newErrors.companyName = "請輸入公司名稱";
+      isValid = false;
+    }
+
+    if (selectedStandards.length === 0) {
+      newErrors.standards = "請至少選擇一個揭露項目";
+      isValid = false;
+    }
+
+    const hasSource = rawInput.trim() || files.length > 0 || urls.length > 0 || useGoogleSearch;
+    if (!hasSource) {
+      newErrors.source = "請至少提供一種資料來源 (文字、檔案、連結或搜尋)";
+      isValid = false;
+    }
+
+    setErrors(newErrors);
+    
+    // Trigger toasts for non-field specific errors or general guidance
+    if (!isValid) {
+        if (newErrors.standards) toast.error(newErrors.standards, { id: 'err-std' });
+        else if (newErrors.source) toast.error(newErrors.source, { id: 'err-src' });
+        else if (newErrors.companyName) toast.error("請檢查表單欄位", { id: 'err-form' });
+    }
+
+    return isValid;
+  };
+
   // Handlers
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const newFiles = Array.from(e.target.files);
       setFiles(prev => [...prev, ...newFiles]);
+      // Clear source error if it exists
+      if (errors.source) setErrors(prev => ({ ...prev, source: '' }));
     }
   };
 
@@ -60,6 +99,8 @@ const App: React.FC = () => {
     if (currentUrl.trim()) {
       setUrls(prev => [...prev, currentUrl.trim()]);
       setCurrentUrl('');
+      // Clear source error if it exists
+      if (errors.source) setErrors(prev => ({ ...prev, source: '' }));
     }
   };
 
@@ -69,24 +110,22 @@ const App: React.FC = () => {
 
   const handleStandardToggle = (standard: StandardType) => {
     setSelectedStandards(prev => {
+      let newState;
       if (prev.includes(standard)) {
-        return prev.filter(s => s !== standard);
+        newState = prev.filter(s => s !== standard);
       } else {
-        return [...prev, standard];
+        newState = [...prev, standard];
       }
+      // Clear standards error if selection is not empty
+      if (newState.length > 0 && errors.standards) {
+          setErrors(e => ({ ...e, standards: '' }));
+      }
+      return newState;
     });
   };
 
   const handleGenerate = async () => {
-    if (!rawInput.trim() && files.length === 0 && urls.length === 0 && !useGoogleSearch) {
-      alert("請至少提供一項資料來源：輸入文字、上傳檔案、提供連結或啟用 Google 搜尋。");
-      return;
-    }
-
-    if (selectedStandards.length === 0) {
-      alert("請至少選擇一個揭露項目 (Please select at least one disclosure item)");
-      return;
-    }
+    if (!validateForm()) return;
 
     setIsLoading(true);
     setError(null);
@@ -100,7 +139,7 @@ const App: React.FC = () => {
 
     try {
       // Step 1: "Retrieve" (Simulated RAG)
-      const context = retrieveContext(selectedStandards);
+      const context = await retrieveContext(selectedStandards);
       setRetrievedContext(context);
 
       // Step 2: "Generate" (Gemini 3 Pro)
@@ -116,7 +155,10 @@ const App: React.FC = () => {
         tone,
         includeTables,
         includeCharts,
-        useGoogleSearch // Pass the search preference
+        useGoogleSearch, // Pass the search preference
+        (streamedText) => {
+             setGeneratedReport(streamedText);
+        }
       );
       setGeneratedReport(report);
       
@@ -132,9 +174,31 @@ const App: React.FC = () => {
           if (assistantRef.current) {
               try {
                 const greetingResult = await assistantRef.current.sendMessage(
-                    "請向使用者簡短打招呼(我是您的AI編輯助理)，然後根據目前報告文末的「待補充資訊清單」，主動且明確地詢問使用者是否能提供第一項缺漏的資訊 (請列出具體項目)。請保持語氣專業且友善。"
+                    "請向使用者簡短打招呼(我是您的AI編輯助理)，然後根據目前報告文末的「待補充資訊清單」，主動且明確地詢問使用者是否能提供第一項缺漏的資訊 (請列出具體項目)。請保持語氣專業且友善。",
+                    [],
+                    (text) => {
+                        setChatMessages(prev => {
+                            const newHistory = [...prev];
+                            if (newHistory.length > 0 && newHistory[newHistory.length - 1].role === 'model') {
+                                newHistory[newHistory.length - 1].text = text;
+                                return newHistory;
+                            } else {
+                                return [...newHistory, { role: 'model', text }];
+                            }
+                        });
+                    }
                 );
-                setChatMessages([{ role: 'model', text: greetingResult.responseText }]);
+                
+                // Ensure final state
+                setChatMessages(prev => {
+                     const newHistory = [...prev];
+                     if (newHistory.length > 0 && newHistory[newHistory.length - 1].role === 'model') {
+                        newHistory[newHistory.length - 1].text = greetingResult.responseText;
+                        return newHistory;
+                     } 
+                     return [{ role: 'model', text: greetingResult.responseText }];
+                });
+
                 setIsChatOpen(true);
               } catch (e) {
                   console.error("Auto-greeting failed", e);
@@ -146,9 +210,10 @@ const App: React.FC = () => {
 
     } catch (err: any) {
       setError(err.message || "An error occurred during generation.");
-      setIsLoading(false); // Stop loading only on error, otherwise let the greeting effect finish? No, better stop here.
+      toast.error(err.message || "生成報告時發生錯誤");
+      setIsLoading(false); 
     } finally {
-        if (!assistantRef.current) setIsLoading(false); // Only set loading false if we didn't go into the greeting flow, or simplify:
+        if (!assistantRef.current) setIsLoading(false); 
         setIsLoading(false);
     }
   };
@@ -156,7 +221,14 @@ const App: React.FC = () => {
   const handleCopy = () => {
     if (generatedReport) {
       navigator.clipboard.writeText(generatedReport);
-      alert("Report copied to clipboard!");
+      toast.success("報告已複製到剪貼簿！", {
+          icon: '📋',
+          style: {
+              borderRadius: '10px',
+              background: '#333',
+              color: '#fff',
+          },
+      });
     }
   };
 
@@ -172,24 +244,50 @@ const App: React.FC = () => {
     }
     setChatMessages(prev => [...prev, { role: 'user', text: userMsgText }]);
 
+    // Placeholder for stream
+    setChatMessages(prev => [...prev, { role: 'model', text: "" }]);
+
     try {
       // Pass files to the assistant service
-      const result = await assistantRef.current.sendMessage(text, files);
+      const result = await assistantRef.current.sendMessage(
+          text, 
+          files,
+          (streamedText) => {
+            setChatMessages(prev => {
+                const newHistory = [...prev];
+                const lastIdx = newHistory.length - 1;
+                if (newHistory[lastIdx].role === 'model') {
+                    newHistory[lastIdx].text = streamedText;
+                }
+                return newHistory;
+            });
+          }
+      );
       
       // Update Report if tool was called
       if (result.updatedReport) {
         setGeneratedReport(result.updatedReport);
-        setChatMessages(prev => [
-            ...prev, 
-            { role: 'model', text: result.responseText }
-        ]);
-      } else {
-        setChatMessages(prev => [...prev, { role: 'model', text: result.responseText }]);
+        toast.success("報告內容已更新", { id: 'report-updated' });
       }
+      
+      // Final sync
+      setChatMessages(prev => {
+        const newHistory = [...prev];
+        const lastIdx = newHistory.length - 1;
+        if (newHistory[lastIdx].role === 'model') {
+            newHistory[lastIdx].text = result.responseText;
+        }
+        return newHistory;
+      });
 
     } catch (e) {
       console.error(e);
-      setChatMessages(prev => [...prev, { role: 'model', text: "Error communicating with assistant." }]);
+      setChatMessages(prev => {
+         const newHistory = [...prev];
+         newHistory[newHistory.length - 1].text = "Error communicating with assistant.";
+         return newHistory;
+      });
+      toast.error("助理回應發生錯誤");
     } finally {
       setIsChatProcessing(false);
     }
@@ -243,6 +341,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen flex-col md:flex-row bg-[#F8F9FB] overflow-hidden font-sans relative text-gray-800">
+      <Toaster position="top-center" />
       
       {/* LEFT COLUMN: Sidebar / Settings */}
       <aside className="w-full md:w-1/3 lg:w-[420px] bg-white border-r border-gray-100 flex flex-col h-full shadow-lg shadow-gray-200/50 z-20 flex-shrink-0">
@@ -263,15 +362,25 @@ const App: React.FC = () => {
           <div className="flex gap-4">
             <div className="flex-1">
               <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
-                公司名稱
+                公司名稱 <span className="text-red-500">*</span>
               </label>
               <input
                 type="text"
-                className="block w-full rounded-xl border-0 bg-gray-50 p-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none placeholder:text-gray-400"
+                className={`block w-full rounded-xl border-0 p-3 text-sm text-gray-900 ring-1 ring-inset focus:ring-2 focus:ring-inset transition-all outline-none placeholder:text-gray-400 ${
+                  errors.companyName 
+                    ? 'bg-red-50 ring-red-300 focus:ring-red-500' 
+                    : 'bg-gray-50 ring-gray-200 focus:ring-leaf-500'
+                }`}
                 placeholder="例如：範例科技股份有限公司"
                 value={companyName}
-                onChange={(e) => setCompanyName(e.target.value)}
+                onChange={(e) => {
+                    setCompanyName(e.target.value);
+                    if (errors.companyName) setErrors(err => ({...err, companyName: ''}));
+                }}
               />
+              {errors.companyName && (
+                  <p className="mt-1 text-xs text-red-500 font-medium animate-pulse">{errors.companyName}</p>
+              )}
             </div>
             <div className="w-1/3">
               <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
@@ -297,8 +406,8 @@ const App: React.FC = () => {
 
           {/* Standard Selector */}
           <div>
-            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
-              揭露項目 <span className="text-leaf-600 font-normal normal-case ml-1">(已選 {selectedStandards.length} 項)</span>
+            <label className={`block text-xs font-bold uppercase tracking-wider mb-2 ml-1 ${errors.standards ? 'text-red-500' : 'text-gray-500'}`}>
+              揭露項目 <span className={`font-normal normal-case ml-1 ${errors.standards ? 'text-red-500' : 'text-leaf-600'}`}>(已選 {selectedStandards.length} 項)</span>
             </label>
             
             <div className="relative mb-3 group">
@@ -309,7 +418,7 @@ const App: React.FC = () => {
               </div>
               <input 
                 type="text" 
-                className="block w-full rounded-xl border-0 bg-gray-50 py-2.5 pl-10 pr-3 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none" 
+                className={`block w-full rounded-xl border-0 bg-gray-50 py-2.5 pl-10 pr-3 text-sm text-gray-900 ring-1 ring-inset focus:ring-2 focus:ring-inset focus:ring-leaf-500 transition-all outline-none ${errors.standards ? 'ring-red-200' : 'ring-gray-200'}`} 
                 placeholder="搜尋準則 (如: 305, 溫室氣體...)"
                 value={standardSearchTerm}
                 onChange={(e) => setStandardSearchTerm(e.target.value)}
@@ -324,7 +433,7 @@ const App: React.FC = () => {
               )}
             </div>
 
-            <div className="border border-gray-200 rounded-2xl bg-white max-h-64 overflow-y-auto p-3 shadow-sm scrollbar-thin">
+            <div className={`border rounded-2xl bg-white max-h-64 overflow-y-auto p-3 shadow-sm scrollbar-thin ${errors.standards ? 'border-red-300' : 'border-gray-200'}`}>
               {renderCheckboxGroup("GRI 2: 一般揭露 (General)", gri2Options)}
               {renderCheckboxGroup("GRI 3: 重大主題 (Material)", gri3Options)}
               {renderCheckboxGroup("GRI 200: 經濟 (Economic)", gri200Options)}
@@ -386,7 +495,10 @@ const App: React.FC = () => {
                         type="checkbox"
                         className="h-4 w-4 text-leaf-600 focus:ring-leaf-500 border-gray-300 rounded"
                         checked={useGoogleSearch}
-                        onChange={(e) => setUseGoogleSearch(e.target.checked)}
+                        onChange={(e) => {
+                            setUseGoogleSearch(e.target.checked);
+                            if (errors.source) setErrors(e => ({...e, source: ''}));
+                        }}
                         />
                         <span className="ml-2 text-sm text-gray-700 font-medium">使用 Google 搜尋補充資料 (Google Search)</span>
                     </label>
@@ -416,26 +528,37 @@ const App: React.FC = () => {
 
           {/* Input Area */}
           <div className="flex-1 flex flex-col min-h-[150px]">
-            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+            <label className={`block text-xs font-bold uppercase tracking-wider mb-2 ml-1 ${errors.source ? 'text-red-500' : 'text-gray-500'}`}>
               文字資料輸入 (Data Input)
             </label>
             <textarea
-              className="w-full flex-1 rounded-2xl border-0 bg-gray-50 p-4 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 resize-none shadow-sm transition-all outline-none"
+              className={`w-full flex-1 rounded-2xl border-0 p-4 text-sm text-gray-900 ring-1 ring-inset focus:ring-2 focus:ring-inset resize-none shadow-sm transition-all outline-none ${
+                  errors.source 
+                    ? 'bg-red-50 ring-red-200 focus:ring-red-500' 
+                    : 'bg-gray-50 ring-gray-200 focus:ring-leaf-500'
+              }`}
               placeholder={`請在此貼上欲整合的原始文字資料...`}
               value={rawInput}
-              onChange={(e) => setRawInput(e.target.value)}
+              onChange={(e) => {
+                  setRawInput(e.target.value);
+                  if (errors.source) setErrors(e => ({...e, source: ''}));
+              }}
             />
           </div>
 
           {/* URL Input */}
           <div>
-            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+            <label className={`block text-xs font-bold uppercase tracking-wider mb-2 ml-1 ${errors.source ? 'text-red-500' : 'text-gray-500'}`}>
               網頁連結 (Reference URLs)
             </label>
             <div className="flex gap-2">
               <input 
                 type="text"
-                className="flex-1 rounded-xl border-0 bg-gray-50 px-4 py-2.5 text-sm ring-1 ring-inset ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500 outline-none transition-all"
+                className={`flex-1 rounded-xl border-0 px-4 py-2.5 text-sm ring-1 ring-inset outline-none transition-all ${
+                    errors.source 
+                        ? 'bg-red-50 ring-red-200 focus:ring-red-500' 
+                        : 'bg-gray-50 ring-gray-200 focus:ring-2 focus:ring-inset focus:ring-leaf-500'
+                }`}
                 placeholder="https://..."
                 value={currentUrl}
                 onChange={(e) => setCurrentUrl(e.target.value)}
@@ -470,12 +593,16 @@ const App: React.FC = () => {
 
           {/* File Upload */}
           <div>
-            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">
+            <label className={`block text-xs font-bold uppercase tracking-wider mb-2 ml-1 ${errors.source ? 'text-red-500' : 'text-gray-500'}`}>
               參考資料上傳 (Files)
             </label>
             <div 
               onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-gray-200 rounded-2xl p-6 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-50 hover:border-leaf-400 transition-all duration-300 group bg-white"
+              className={`border-2 border-dashed rounded-2xl p-6 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-50 transition-all duration-300 group bg-white ${
+                  errors.source 
+                  ? 'border-red-300 hover:border-red-400' 
+                  : 'border-gray-200 hover:border-leaf-400'
+              }`}
             >
               <input 
                 type="file" 
@@ -485,12 +612,12 @@ const App: React.FC = () => {
                 multiple 
                 accept="image/*,application/pdf,.docx,.xlsx,.xls"
               />
-              <div className="p-3 bg-gray-50 rounded-full mb-3 group-hover:scale-110 transition-transform duration-300">
-                <svg className="h-6 w-6 text-gray-400 group-hover:text-leaf-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div className={`p-3 rounded-full mb-3 group-hover:scale-110 transition-transform duration-300 ${errors.source ? 'bg-red-50' : 'bg-gray-50'}`}>
+                <svg className={`h-6 w-6 transition-colors ${errors.source ? 'text-red-400' : 'text-gray-400 group-hover:text-leaf-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
               </div>
-              <p className="text-xs text-gray-500 text-center font-medium">
+              <p className={`text-xs text-center font-medium ${errors.source ? 'text-red-400' : 'text-gray-500'}`}>
                 點擊上傳 PDF, Word, Excel, Images
               </p>
             </div>

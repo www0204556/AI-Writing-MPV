@@ -1,5 +1,4 @@
-import mammoth from 'mammoth';
-import * as XLSX from 'xlsx';
+import { WorkerMessage, WorkerResponse } from './fileWorker';
 
 export interface ProcessedPart {
   text?: string;
@@ -10,88 +9,48 @@ export interface ProcessedPart {
 }
 
 /**
- * Converts a File object into a format suitable for the Gemini API.
- * - PDF/Images: Converted to Base64 (inlineData)
- * - Docx/Excel: Text extracted client-side (text)
+ * Converts a File object into a format suitable for the Gemini API using a Web Worker.
  */
-export const processFile = async (file: File): Promise<ProcessedPart> => {
-  const arrayBuffer = await file.arrayBuffer();
+export const processFile = (file: File): Promise<ProcessedPart> => {
+  return new Promise((resolve, reject) => {
+    // Create a new worker for each file processing task (simple approach)
+    // In a production app, you might want to reuse a worker instance (Worker Pool)
+    const worker = new Worker(new URL('./fileWorker.ts', import.meta.url), { type: 'module' });
 
-  // Handle PDF
-  if (file.type === 'application/pdf') {
-    const base64 = await bufferToBase64(arrayBuffer);
-    return { 
-      inlineData: { 
-        mimeType: 'application/pdf', 
-        data: base64 
-      } 
+    worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
+      const response = e.data;
+      if (response.error) {
+        console.error(`Error processing file ${file.name}:`, response.error);
+        // Fallback to error text instead of rejecting, so one bad file doesn't kill the whole request
+        resolve({ text: `[Error parsing file: ${file.name}]` });
+      } else {
+        resolve({
+          text: response.text,
+          inlineData: response.inlineData
+        });
+      }
+      worker.terminate();
     };
-  }
-  
-  // Handle Images
-  if (file.type.startsWith('image/')) {
-    const base64 = await bufferToBase64(arrayBuffer);
-    return { 
-      inlineData: { 
-        mimeType: file.type, 
-        data: base64 
-      } 
+
+    worker.onerror = (err) => {
+      console.error(`Worker error for file ${file.name}:`, err);
+      resolve({ text: `[Error processing file: ${file.name}]` });
+      worker.terminate();
     };
-  }
 
-  // Handle Word Documents (.docx)
-  if (file.name.endsWith('.docx')) {
-     try {
-       const result = await mammoth.extractRawText({ arrayBuffer });
-       return { text: `\n[Attached File Content: ${file.name}]\n${result.value}\n[End of File: ${file.name}]\n` };
-     } catch (e) {
-       console.error("Docx parsing failed", e);
-       return { text: `[Error parsing file: ${file.name}]` };
-     }
-  }
-
-  // Handle Excel Files (.xlsx, .xls)
-  if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
-     try {
-       const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-       let csvContent = "";
-       for(const sheetName of workbook.SheetNames) {
-          const sheet = workbook.Sheets[sheetName];
-          const csv = XLSX.utils.sheet_to_csv(sheet);
-          if (csv.trim()) {
-            csvContent += `[Sheet: ${sheetName}]\n${csv}\n`;
-          }
-       }
-       return { text: `\n[Attached File Content: ${file.name}]\n${csvContent}\n[End of File: ${file.name}]\n` };
-     } catch (e) {
-       console.error("Excel parsing failed", e);
-       return { text: `[Error parsing file: ${file.name}]` };
-     }
-  }
-
-  // Fallback for text files
-  if (file.type.startsWith('text/')) {
-    const text = new TextDecoder().decode(arrayBuffer);
-    return { text: `\n[Attached File Content: ${file.name}]\n${text}\n` };
-  }
-
-  return { text: `[Skipped unsupported file: ${file.name}]` };
-};
-
-/**
- * Helper to convert ArrayBuffer to Base64 string (without data URL prefix)
- */
-function bufferToBase64(buffer: ArrayBuffer): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const blob = new Blob([buffer]);
-        const reader = new FileReader();
-        reader.onload = () => {
-            const result = reader.result as string;
-            // remove data:mime/type;base64, prefix
-            const base64 = result.split(',')[1];
-            resolve(base64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
+    // Send data to worker
+    file.arrayBuffer().then(buffer => {
+      const message: WorkerMessage = {
+        fileData: buffer,
+        fileName: file.name,
+        fileType: file.type
+      };
+      // Transfer the buffer to the worker for performance
+      worker.postMessage(message, [buffer]);
+    }).catch(err => {
+       console.error("Failed to read file buffer", err);
+       resolve({ text: `[Error reading file: ${file.name}]` });
+       worker.terminate();
     });
-}
+  });
+};

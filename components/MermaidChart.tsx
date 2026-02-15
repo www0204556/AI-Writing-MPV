@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import mermaid from 'mermaid';
 
 interface MermaidChartProps {
   chart: string;
@@ -16,16 +15,19 @@ const MermaidChart: React.FC<MermaidChartProps> = ({ chart }) => {
   useEffect(() => {
     isMounted.current = true;
     
-    mermaid.initialize({ 
-        startOnLoad: false,
-        theme: 'neutral',
-        securityLevel: 'loose'
-    });
-
-    const renderChart = async () => {
+    const initAndRender = async () => {
       if (!chart) return;
       
       try {
+        // Dynamic Import: Only load mermaid when component mounts
+        const { default: mermaid } = await import('mermaid');
+        
+        mermaid.initialize({ 
+            startOnLoad: false,
+            theme: 'neutral',
+            securityLevel: 'loose'
+        });
+
         // Ensure container exists before attempting render
         if (containerRef.current) {
           const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
@@ -46,7 +48,7 @@ const MermaidChart: React.FC<MermaidChartProps> = ({ chart }) => {
       }
     };
 
-    renderChart();
+    initAndRender();
 
     return () => {
         isMounted.current = false;
