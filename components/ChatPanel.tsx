@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { ChatMessage } from '../types';
 
 interface ChatPanelProps {
@@ -110,12 +111,15 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ messages, onSendMessage, isProces
     }
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div className="w-full md:w-[380px] bg-white border-l border-gray-100 flex flex-col h-full shadow-2xl shadow-gray-200/50 absolute md:relative right-0 z-30 transition-all duration-300">
-      {/* Header */}
-      <div className="p-4 border-b border-gray-100 bg-white flex justify-between items-center h-[72px] flex-shrink-0">
+    <div 
+      className={`bg-white border-l border-gray-100 flex flex-col h-full shadow-2xl shadow-gray-200/50 absolute md:relative right-0 z-30 transition-all duration-300 ease-in-out ${
+        isOpen ? 'w-full md:w-[380px] translate-x-0 opacity-100' : 'w-0 translate-x-full opacity-0 overflow-hidden'
+      }`}
+    >
+      <div className="w-full md:w-[380px] flex flex-col h-full">
+        {/* Header */}
+        <div className="p-4 border-b border-gray-100 bg-white flex justify-between items-center h-[72px] flex-shrink-0">
         <h3 className="font-bold flex items-center gap-2 text-gray-800">
           <div className="p-1.5 bg-leaf-100 rounded-lg text-leaf-600">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -165,6 +169,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ messages, onSendMessage, isProces
               >
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeRaw]}
                   components={{
                     p: ({node, ...props}) => <p className="mb-2 last:mb-0" {...props} />,
                     strong: ({node, ...props}) => <strong className="font-bold opacity-90" {...props} />,
@@ -286,6 +291,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ messages, onSendMessage, isProces
             </button>
           </div>
         </form>
+      </div>
       </div>
     </div>
   );

@@ -8,39 +8,72 @@ export interface ProcessedPart {
   };
 }
 
+// Singleton worker instance
+let sharedWorker: Worker | null = null;
+let messageIdCounter = 0;
+const pendingRequests = new Map<string, { resolve: (val: ProcessedPart) => void, reject: (err: any) => void, fileName: string }>();
+
+const getWorker = (): Worker => {
+  if (!sharedWorker) {
+    sharedWorker = new Worker(new URL('./fileWorker.ts', import.meta.url), { type: 'module' });
+    
+    sharedWorker.onmessage = (e: MessageEvent<WorkerResponse>) => {
+      const response = e.data;
+      const handlers = pendingRequests.get(response.id);
+      
+      if (handlers) {
+        pendingRequests.delete(response.id);
+        if (response.error) {
+          console.error(`Error processing file ${handlers.fileName}:`, response.error);
+          handlers.resolve({ text: `[Error parsing file: ${handlers.fileName}]` });
+        } else {
+          handlers.resolve({
+            text: response.text,
+            inlineData: response.inlineData
+          });
+        }
+      }
+    };
+
+    sharedWorker.onerror = (err) => {
+      console.error(`Worker error:`, err);
+      // Resolve all pending requests with error
+      for (const [id, handlers] of pendingRequests.entries()) {
+        handlers.resolve({ text: `[Error processing file: ${handlers.fileName}]` });
+      }
+      pendingRequests.clear();
+      // Restart worker on next request
+      sharedWorker?.terminate();
+      sharedWorker = null;
+    };
+  }
+  return sharedWorker;
+};
+
 /**
  * Converts a File object into a format suitable for the Gemini API using a Web Worker.
  */
 export const processFile = (file: File): Promise<ProcessedPart> => {
   return new Promise((resolve, reject) => {
-    // Create a new worker for each file processing task (simple approach)
-    // In a production app, you might want to reuse a worker instance (Worker Pool)
-    const worker = new Worker(new URL('./fileWorker.ts', import.meta.url), { type: 'module' });
+    const worker = getWorker();
+    const id = `msg_${++messageIdCounter}`;
+    
+    const timeoutId = setTimeout(() => {
+      pendingRequests.delete(id);
+      console.warn(`File processing timed out for ${file.name}`);
+      resolve({ text: `[Error: Processing file ${file.name} timed out]` });
+    }, 8000); // 8 seconds timeout
 
-    worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
-      const response = e.data;
-      if (response.error) {
-        console.error(`Error processing file ${file.name}:`, response.error);
-        // Fallback to error text instead of rejecting, so one bad file doesn't kill the whole request
-        resolve({ text: `[Error parsing file: ${file.name}]` });
-      } else {
-        resolve({
-          text: response.text,
-          inlineData: response.inlineData
-        });
-      }
-      worker.terminate();
-    };
-
-    worker.onerror = (err) => {
-      console.error(`Worker error for file ${file.name}:`, err);
-      resolve({ text: `[Error processing file: ${file.name}]` });
-      worker.terminate();
-    };
+    pendingRequests.set(id, { 
+      resolve: (val) => { clearTimeout(timeoutId); resolve(val); }, 
+      reject: (err) => { clearTimeout(timeoutId); reject(err); }, 
+      fileName: file.name 
+    });
 
     // Send data to worker
     file.arrayBuffer().then(buffer => {
       const message: WorkerMessage = {
+        id,
         fileData: buffer,
         fileName: file.name,
         fileType: file.type
@@ -49,8 +82,8 @@ export const processFile = (file: File): Promise<ProcessedPart> => {
       worker.postMessage(message, [buffer]);
     }).catch(err => {
        console.error("Failed to read file buffer", err);
+       pendingRequests.delete(id);
        resolve({ text: `[Error reading file: ${file.name}]` });
-       worker.terminate();
     });
   });
 };

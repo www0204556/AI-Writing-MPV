@@ -4,11 +4,12 @@ import { processFile, ProcessedPart } from "./fileProcessing";
 import { getReportSystemPrompt, getChatAssistantSystemPrompt, getToneInstruction } from "../data/prompts";
 
 // Configuration Constants
-const MODEL_ID = 'gemini-3-pro-preview'; 
+const REPORT_MODEL_ID = 'gemini-3.1-pro-preview'; 
+const CHAT_MODEL_ID = 'gemini-3-flash-preview';
 const THINKING_BUDGET = 1024; 
 
 // Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 /**
  * Robust retry mechanism for API calls.
@@ -107,11 +108,15 @@ export const generateReport = async (
       : `3. **表格 (Tables):** 請勿使用 Markdown 表格，數據請以文字敘述呈現。`;
 
   const chartInstruction = includeCharts
-      ? `4. **圖表 (Charts):** 主動識別適合視覺化的數據並製作 Mermaid.js 圖表 (pie, xychart-beta, flowchart)。每個圖表前必須提供數據來源表格。`
+      ? `4. **圖表 (Charts):** 主動識別適合視覺化的數據並製作 Mermaid.js 圖表 (pie, xychart-beta, flowchart)。每個圖表前必須提供數據來源表格。
+   **重要 Mermaid 語法規則：**
+   - 確保所有節點和連線完整 (例如 \`A --> B\`)，不可有未完成的連線 (如 \`A --> \`)。
+   - 節點文字若包含特殊字元或空格，請使用引號包覆 (例如 \`A["節點文字"]\`)。
+   - 確保括號、引號等符號完整閉合。`
       : `4. **圖表 (Charts):** 本次報告**不製作**任何 Mermaid 圖表。`;
 
   const searchInstruction = useGoogleSearch
-      ? `6. **搜尋資料:** 務必善用 Google Search 工具來補充最新的相關產業資訊、競業數據或法規動態。若有引用搜尋結果，請確保資訊準確。`
+      ? `6. **搜尋資料:** 務必善用 Google Search 工具來補充相關產業資訊、競業數據或法規動態。請務必搜尋並使用「${reportingYear}」年度及其前一年度（近2年）的最新參考資料，作為生成報告的重要依據。若有引用搜尋結果，請確保資訊準確。`
       : ``;
 
   const systemPrompt = getReportSystemPrompt(
@@ -139,7 +144,7 @@ export const generateReport = async (
     // STREAMING IMPLEMENTATION
     const result = await callWithRetry(async () => {
         return await ai.models.generateContentStream({
-            model: MODEL_ID,
+            model: REPORT_MODEL_ID,
             contents: { parts },
             config: {
                 thinkingConfig: { thinkingBudget: THINKING_BUDGET },
@@ -226,9 +231,8 @@ export class ReportAssistant {
     const systemInstruction = getChatAssistantSystemPrompt(companyName);
     
     this.chat = ai.chats.create({
-      model: MODEL_ID, 
+      model: CHAT_MODEL_ID, 
       config: {
-        thinkingConfig: { thinkingBudget: THINKING_BUDGET }, 
         systemInstruction: systemInstruction,
         tools: [{ functionDeclarations: [updateReportTool] }],
       },

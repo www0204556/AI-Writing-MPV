@@ -131,3 +131,12 @@ export interface ChatMessage {
   text: string;
   isSystem?: boolean; // For messages like "Report updated"
 }
+
+declare global {
+  interface Window {
+    aistudio?: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}

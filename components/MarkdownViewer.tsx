@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import MermaidChart from './MermaidChart';
 
 interface MarkdownViewerProps {
@@ -12,6 +13,7 @@ const MarkdownViewer: React.FC<MarkdownViewerProps> = React.memo(({ content }) =
     <div className="prose prose-sm md:prose-base prose-leaf max-w-none text-gray-700 leading-relaxed font-normal">
       <ReactMarkdown 
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw]}
         components={{
           // Customize links to look like blue text for GRI standards
           a: ({node, href, children, ...props}) => {

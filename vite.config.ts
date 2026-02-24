@@ -10,9 +10,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     define: {
-      // This ensures that process.env.API_KEY in your code is replaced
+      // This ensures that process.env.GEMINI_API_KEY in your code is replaced
       // by the actual environment variable value during the build.
-      'process.env.API_KEY': JSON.stringify(env.API_KEY),
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
       // Polyfill process.env for other potential uses (though not recommended for secrets)
       'process.env': {} 
     },

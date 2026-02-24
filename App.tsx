@@ -10,7 +10,7 @@ const App: React.FC = () => {
   // State Management
   const [selectedStandards, setSelectedStandards] = useState<StandardType[]>([]);
   const [companyName, setCompanyName] = useState<string>('');
-  const [reportingYear, setReportingYear] = useState<string>('2024'); // Default to 2024
+  const [reportingYear, setReportingYear] = useState<string>('2025'); // Default to 2025
   const [standardSearchTerm, setStandardSearchTerm] = useState<string>(''); // For searching standards
 
   const [rawInput, setRawInput] = useState<string>('');
@@ -46,6 +46,7 @@ const App: React.FC = () => {
   const assistantRef = useRef<ReportAssistant | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mainScrollRef = useRef<HTMLDivElement>(null);
 
   // Validation Logic
   const validateForm = () => {
@@ -127,6 +128,10 @@ const App: React.FC = () => {
   const handleGenerate = async () => {
     if (!validateForm()) return;
 
+    if (mainScrollRef.current) {
+      mainScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
     setIsLoading(true);
     setError(null);
     setGeneratedReport(null);
@@ -167,12 +172,16 @@ const App: React.FC = () => {
       assistantRef.current = new ReportAssistant(report, context, companyName);
       
       // Step 4: Proactive Greeting (Active Mode)
+      setIsChatOpen(true); // Open immediately
       setIsChatProcessing(true);
       
       // Slight delay to ensure UI renders first
       setTimeout(async () => {
           if (assistantRef.current) {
               try {
+                // Add an initial empty message for the model so the UI shows it's typing
+                setChatMessages([{ role: 'model', text: '' }]);
+                
                 const greetingResult = await assistantRef.current.sendMessage(
                     "請向使用者簡短打招呼(我是您的AI編輯助理)，然後根據目前報告文末的「待補充資訊清單」，主動且明確地詢問使用者是否能提供第一項缺漏的資訊 (請列出具體項目)。請保持語氣專業且友善。",
                     [],
@@ -199,14 +208,13 @@ const App: React.FC = () => {
                      return [{ role: 'model', text: greetingResult.responseText }];
                 });
 
-                setIsChatOpen(true);
               } catch (e) {
                   console.error("Auto-greeting failed", e);
               } finally {
                   setIsChatProcessing(false);
               }
           }
-      }, 500);
+      }, 50);
 
     } catch (err: any) {
       setError(err.message || "An error occurred during generation.");
@@ -700,7 +708,7 @@ const App: React.FC = () => {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 relative scrollbar-thin">
+        <div ref={mainScrollRef} className="flex-1 overflow-y-auto p-4 md:p-8 relative scrollbar-thin">
           <div className="max-w-4xl mx-auto space-y-6 pb-20">
             
             {/* Error Message */}

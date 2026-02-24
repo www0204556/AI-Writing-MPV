@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 
 // Define the shape of data sent TO the worker
 export interface WorkerMessage {
+  id: string;
   fileData: ArrayBuffer;
   fileName: string;
   fileType: string;
@@ -10,6 +11,7 @@ export interface WorkerMessage {
 
 // Define the shape of data returned FROM the worker
 export interface WorkerResponse {
+  id: string;
   text?: string;
   inlineData?: {
     mimeType: string;
@@ -19,26 +21,28 @@ export interface WorkerResponse {
 }
 
 /**
- * Helper to convert ArrayBuffer to Base64 string
+ * Helper to convert ArrayBuffer to Base64 string efficiently
  */
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
     let binary = '';
     const bytes = new Uint8Array(buffer);
     const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i]);
+    const chunkSize = 0x8000; // 32768
+    for (let i = 0; i < len; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize) as unknown as number[]);
     }
     return btoa(binary);
 }
 
 self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
-  const { fileData, fileName, fileType } = e.data;
+  const { id, fileData, fileName, fileType } = e.data;
 
   try {
     // Handle PDF
     if (fileType === 'application/pdf') {
       const base64 = arrayBufferToBase64(fileData);
       self.postMessage({ 
+        id,
         inlineData: { 
           mimeType: 'application/pdf', 
           data: base64 
@@ -51,6 +55,7 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
     if (fileType.startsWith('image/')) {
       const base64 = arrayBufferToBase64(fileData);
       self.postMessage({ 
+        id,
         inlineData: { 
           mimeType: fileType, 
           data: base64 
@@ -64,10 +69,11 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
        try {
          const result = await mammoth.extractRawText({ arrayBuffer: fileData });
          self.postMessage({ 
+            id,
             text: `\n[Attached File Content: ${fileName}]\n${result.value}\n[End of File: ${fileName}]\n` 
          } as WorkerResponse);
        } catch (err: any) {
-         self.postMessage({ error: `Docx parsing failed: ${err.message}` } as WorkerResponse);
+         self.postMessage({ id, error: `Docx parsing failed: ${err.message}` } as WorkerResponse);
        }
        return;
     }
@@ -85,10 +91,11 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
             }
          }
          self.postMessage({ 
+            id,
             text: `\n[Attached File Content: ${fileName}]\n${csvContent}\n[End of File: ${fileName}]\n` 
          } as WorkerResponse);
        } catch (err: any) {
-         self.postMessage({ error: `Excel parsing failed: ${err.message}` } as WorkerResponse);
+         self.postMessage({ id, error: `Excel parsing failed: ${err.message}` } as WorkerResponse);
        }
        return;
     }
@@ -97,14 +104,15 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
     if (fileType.startsWith('text/')) {
       const text = new TextDecoder().decode(fileData);
       self.postMessage({ 
+        id,
         text: `\n[Attached File Content: ${fileName}]\n${text}\n` 
       } as WorkerResponse);
       return;
     }
 
-    self.postMessage({ text: `[Skipped unsupported file: ${fileName}]` } as WorkerResponse);
+    self.postMessage({ id, text: `[Skipped unsupported file: ${fileName}]` } as WorkerResponse);
 
   } catch (err: any) {
-      self.postMessage({ error: `Unknown worker error: ${err.message}` } as WorkerResponse);
+      self.postMessage({ id, error: `Unknown worker error: ${err.message}` } as WorkerResponse);
   }
 };
